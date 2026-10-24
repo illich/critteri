@@ -1,3 +1,4 @@
+mod player;
 mod world;
 
 use bevy::asset::RenderAssetUsages;
@@ -20,22 +21,42 @@ const BACKGROUND_TEXTURE_TILES: u32 = 8;
 const TILE_SIZE: f32 = 32.0;
 /// How many tiles fit across the screen, regardless of window size.
 const VISIBLE_TILES_X: f32 = 60.0;
-/// Camera scroll speed in tiles per second.
-const SCROLL_SPEED: f32 = 30.0;
+
+/// The generated level and the biomes it was built from.
+#[derive(Resource)]
+struct Level {
+    world: world::World,
+    biomes: world::Biomes,
+}
 
 fn main() {
+    let source = std::fs::read_to_string(BIOMES_FILE)
+        .unwrap_or_else(|e| panic!("cannot read {BIOMES_FILE}: {e}"));
+    let biomes = world::Biomes::from_ron(&source)
+        .unwrap_or_else(|e| panic!("invalid {BIOMES_FILE}: {e}"));
+    let world = world::World::generate(42, &biomes);
+
     App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Colony".into(),
-                mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "Colony".into(),
+                        mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
+                        ..default()
+                    }),
+                    ..default()
+                })
+                .set(AssetPlugin {
+                    file_path: "asset".into(),
+                    ..default()
+                }),
+        )
+        .add_plugins(player::PlayerPlugin)
         .insert_resource(ClearColor(Color::BLACK))
+        .insert_resource(Level { world, biomes })
         .add_systems(Startup, (spawn_camera, spawn_tiles))
-        .add_systems(Update, (scroll_camera, quit_on_esc))
+        .add_systems(Update, (follow_player.after(player::PlayerSystems), quit_on_esc))
         .run();
 }
 
@@ -54,7 +75,7 @@ fn spawn_camera(mut commands: Commands) {
             },
             ..OrthographicProjection::default_2d()
         }),
-        // Start in the bottom-left corner; `scroll_camera` clamps it into the level.
+        // `follow_player` moves it to the player.
         Transform::default(),
     ));
 }
@@ -69,12 +90,8 @@ fn load_tiling_texture(path: &str, tiles_across: u32, images: &mut Assets<Image>
     images.add(Image::from_dynamic(resized, true, RenderAssetUsages::RENDER_WORLD))
 }
 
-fn spawn_tiles(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
-    let source = std::fs::read_to_string(BIOMES_FILE)
-        .unwrap_or_else(|e| panic!("cannot read {BIOMES_FILE}: {e}"));
-    let biomes = world::Biomes::from_ron(&source)
-        .unwrap_or_else(|e| panic!("invalid {BIOMES_FILE}: {e}"));
-    let world = world::World::generate(42, &biomes);
+fn spawn_tiles(mut commands: Commands, level: Res<Level>, mut images: ResMut<Assets<Image>>) {
+    let Level { world, biomes } = &*level;
 
     let materials: Vec<_> = biomes
         .materials
@@ -128,28 +145,13 @@ fn spawn_tiles(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     }
 }
 
-fn scroll_camera(
-    keys: Res<ButtonInput<KeyCode>>,
-    time: Res<Time>,
+fn follow_player(
+    player: Single<&player::Player>,
     camera: Single<(&mut Transform, &Projection), With<Camera2d>>,
 ) {
     let (mut camera, projection) = camera.into_inner();
-    let mut dir = Vec2::ZERO;
-    if keys.any_pressed([KeyCode::KeyA, KeyCode::ArrowLeft]) {
-        dir.x -= 1.0;
-    }
-    if keys.any_pressed([KeyCode::KeyD, KeyCode::ArrowRight]) {
-        dir.x += 1.0;
-    }
-    if keys.any_pressed([KeyCode::KeyW, KeyCode::ArrowUp]) {
-        dir.y += 1.0;
-    }
-    if keys.any_pressed([KeyCode::KeyS, KeyCode::ArrowDown]) {
-        dir.y -= 1.0;
-    }
-
-    let delta = dir.normalize_or_zero() * SCROLL_SPEED * TILE_SIZE * time.delta_secs();
-    camera.translation += delta.extend(0.0);
+    // Centre on the middle of the body rather than the feet.
+    let target = player.focus + Vec2::Y * player::HEIGHT_TILES / 2.0 * TILE_SIZE;
 
     // Keep the view inside the level; the visible area depends on the window's aspect ratio.
     let Projection::Orthographic(ortho) = projection else {
@@ -158,6 +160,6 @@ fn scroll_camera(
     let half_view = ortho.area.half_size();
     let level = Vec2::new(world::WIDTH as f32, world::HEIGHT as f32) * TILE_SIZE;
     let max = (level - half_view).max(half_view);
-    camera.translation.x = camera.translation.x.clamp(half_view.x, max.x);
-    camera.translation.y = camera.translation.y.clamp(half_view.y, max.y);
+    camera.translation.x = target.x.clamp(half_view.x, max.x);
+    camera.translation.y = target.y.clamp(half_view.y, max.y);
 }

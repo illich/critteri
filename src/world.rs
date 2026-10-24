@@ -120,6 +120,22 @@ impl World {
         Self { tiles, biomes: tile_biomes }
     }
 
+    /// A level drawn in ASCII (`#` solid, anything else empty), placed in the
+    /// bottom-left corner of an otherwise empty level. The first row is the top.
+    #[cfg(test)]
+    pub fn from_ascii(rows: &[&str]) -> Self {
+        let mut tiles = vec![Tile::Empty; WIDTH * HEIGHT];
+        for (i, row) in rows.iter().enumerate() {
+            let y = rows.len() - 1 - i;
+            for (x, c) in row.chars().enumerate() {
+                if c == '#' {
+                    tiles[y * WIDTH + x] = Tile::Solid { material: 0 };
+                }
+            }
+        }
+        Self { tiles, biomes: vec![0; WIDTH * HEIGHT] }
+    }
+
     /// `y = 0` is the bottom row.
     pub fn tile(&self, x: usize, y: usize) -> Tile {
         self.tiles[y * WIDTH + x]
@@ -127,6 +143,32 @@ impl World {
 
     pub fn biome(&self, x: usize, y: usize) -> u8 {
         self.biomes[y * WIDTH + x]
+    }
+
+    /// Whether the tile blocks movement. Everything outside the level does.
+    pub fn is_solid(&self, x: i32, y: i32) -> bool {
+        if x < 0 || y < 0 || x >= WIDTH as i32 || y >= HEIGHT as i32 {
+            return true;
+        }
+        matches!(self.tile(x as usize, y as usize), Tile::Solid { .. })
+    }
+
+    /// The lowest empty tile standing on a solid tile of the level (not its
+    /// bottom edge) with `headroom` empty tiles above it (counting itself), in
+    /// the column closest to `near_x` that has one.
+    pub fn find_standing_spot(&self, near_x: usize, headroom: usize) -> Option<(usize, usize)> {
+        let mut columns: Vec<usize> = (0..WIDTH).collect();
+        columns.sort_by_key(|x| x.abs_diff(near_x));
+        columns.into_iter().find_map(|x| {
+            let xi = x as i32;
+            (1..HEIGHT)
+                .find(|&y| {
+                    let yi = y as i32;
+                    self.is_solid(xi, yi - 1)
+                        && (yi..yi + headroom as i32).all(|ty| !self.is_solid(xi, ty))
+                })
+                .map(|y| (x, y))
+        })
     }
 }
 
@@ -192,6 +234,15 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn standing_spot_has_floor_and_headroom() {
+        let world = World::generate(42, &biomes());
+        let (x, y) = world.find_standing_spot(WIDTH / 2, 3).expect("a spot");
+        let (x, y) = (x as i32, y as i32);
+        assert!(world.is_solid(x, y - 1));
+        assert!((y..y + 3).all(|ty| !world.is_solid(x, ty)));
     }
 
     #[test]
