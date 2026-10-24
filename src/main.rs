@@ -1,3 +1,5 @@
+mod cursor;
+mod mining;
 mod player;
 mod world;
 
@@ -55,8 +57,20 @@ fn main() {
         .add_plugins(player::PlayerPlugin)
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(Level { world, biomes })
-        .add_systems(Startup, (spawn_camera, spawn_tiles))
-        .add_systems(Update, (follow_player.after(player::PlayerSystems), quit_on_esc))
+        .init_resource::<cursor::HoveredTile>()
+        .add_systems(
+            Startup,
+            (spawn_camera, spawn_tiles, cursor::spawn_tile_highlight, mining::setup_digging),
+        )
+        .add_systems(
+            Update,
+            (
+                (follow_player, cursor::highlight_hovered_tile, mining::dig)
+                    .chain()
+                    .after(player::PlayerSystems),
+                quit_on_esc,
+            ),
+        )
         .run();
 }
 
@@ -90,59 +104,85 @@ fn load_tiling_texture(path: &str, tiles_across: u32, images: &mut Assets<Image>
     images.add(Image::from_dynamic(resized, true, RenderAssetUsages::RENDER_WORLD))
 }
 
+/// Textures for drawing tiles, and the sprite entity of every tile.
+#[derive(Resource)]
+struct TileGraphics {
+    /// Indexed like [`world::Biomes::materials`].
+    materials: Vec<Handle<Image>>,
+    /// One background per biome, indexed like [`world::Biomes::biomes`].
+    backgrounds: Vec<Handle<Image>>,
+    /// Indexed like the world grid, `y * WIDTH + x`.
+    sprites: Vec<Entity>,
+}
+
+impl TileGraphics {
+    /// The sprite showing tile `(x, y)` as it currently is in `world`.
+    fn sprite(&self, world: &world::World, x: usize, y: usize) -> Sprite {
+        let (texture, tiles_across) = match world.tile(x, y) {
+            world::Tile::Solid { material } => {
+                (&self.materials[material as usize], MATERIAL_TEXTURE_TILES)
+            }
+            world::Tile::Empty => (
+                &self.backgrounds[world.biome(x, y) as usize],
+                BACKGROUND_TEXTURE_TILES,
+            ),
+        };
+        Sprite {
+            image: texture.clone(),
+            rect: Some(texture_rect(x, y, tiles_across)),
+            custom_size: Some(Vec2::splat(TILE_SIZE)),
+            ..default()
+        }
+    }
+}
+
+/// The piece of a seamless texture spanning `tiles_across` tiles that tile
+/// `(x, y)` shows, so neighbouring tiles join up. Image rows run top-down
+/// while world y runs bottom-up.
+fn texture_rect(x: usize, y: usize, tiles_across: u32) -> Rect {
+    let px = TEXTURE_PX_PER_TILE as f32;
+    let u = (x as u32 % tiles_across) as f32 * px;
+    let v = (tiles_across - 1 - y as u32 % tiles_across) as f32 * px;
+    Rect::new(u, v, u + px, v + px)
+}
+
+/// World-space centre of tile `(x, y)` at depth `z`.
+fn tile_center(x: usize, y: usize, z: f32) -> Vec3 {
+    Vec3::new((x as f32 + 0.5) * TILE_SIZE, (y as f32 + 0.5) * TILE_SIZE, z)
+}
+
 fn spawn_tiles(mut commands: Commands, level: Res<Level>, mut images: ResMut<Assets<Image>>) {
     let Level { world, biomes } = &*level;
 
-    let materials: Vec<_> = biomes
-        .materials
-        .iter()
-        .map(|name| {
-            let path = format!("{TILE_TEXTURE_DIR}/materials/{name}.png");
-            load_tiling_texture(&path, MATERIAL_TEXTURE_TILES, &mut images)
-        })
-        .collect();
-    // One background per biome, indexed like `biomes.biomes`.
-    let backgrounds: Vec<_> = biomes
-        .biomes
-        .iter()
-        .map(|biome| {
-            let path = format!("{TILE_TEXTURE_DIR}/backgrounds/{}.png", biome.background);
-            load_tiling_texture(&path, BACKGROUND_TEXTURE_TILES, &mut images)
-        })
-        .collect();
-
+    let mut graphics = TileGraphics {
+        materials: biomes
+            .materials
+            .iter()
+            .map(|name| {
+                let path = format!("{TILE_TEXTURE_DIR}/materials/{name}.png");
+                load_tiling_texture(&path, MATERIAL_TEXTURE_TILES, &mut images)
+            })
+            .collect(),
+        backgrounds: biomes
+            .biomes
+            .iter()
+            .map(|biome| {
+                let path = format!("{TILE_TEXTURE_DIR}/backgrounds/{}.png", biome.background);
+                load_tiling_texture(&path, BACKGROUND_TEXTURE_TILES, &mut images)
+            })
+            .collect(),
+        sprites: Vec::with_capacity(world::WIDTH * world::HEIGHT),
+    };
     for y in 0..world::HEIGHT {
         for x in 0..world::WIDTH {
-            let (texture, tiles_across) = match world.tile(x, y) {
-                world::Tile::Solid { material } => {
-                    (&materials[material as usize], MATERIAL_TEXTURE_TILES)
-                }
-                world::Tile::Empty => (
-                    &backgrounds[world.biome(x, y) as usize],
-                    BACKGROUND_TEXTURE_TILES,
-                ),
-            };
-            // Each tile shows its own piece of the texture, so neighbouring
-            // tiles of the same material join seamlessly. Image rows run
-            // top-down while world y runs bottom-up.
-            let px = TEXTURE_PX_PER_TILE as f32;
-            let u = (x as u32 % tiles_across) as f32 * px;
-            let v = (tiles_across - 1 - y as u32 % tiles_across) as f32 * px;
-            commands.spawn((
-                Sprite {
-                    image: texture.clone(),
-                    rect: Some(Rect::new(u, v, u + px, v + px)),
-                    custom_size: Some(Vec2::splat(TILE_SIZE)),
-                    ..default()
-                },
-                Transform::from_xyz(
-                    (x as f32 + 0.5) * TILE_SIZE,
-                    (y as f32 + 0.5) * TILE_SIZE,
-                    0.0,
-                ),
-            ));
+            let sprite = graphics.sprite(world, x, y);
+            let entity = commands
+                .spawn((sprite, Transform::from_translation(tile_center(x, y, 0.0))))
+                .id();
+            graphics.sprites.push(entity);
         }
     }
+    commands.insert_resource(graphics);
 }
 
 fn follow_player(

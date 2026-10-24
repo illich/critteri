@@ -145,6 +145,14 @@ impl World {
         self.biomes[y * WIDTH + x]
     }
 
+    /// Dig out a solid tile, leaving it empty. Returns whether there was anything to dig.
+    pub fn dig(&mut self, x: usize, y: usize) -> bool {
+        let tile = &mut self.tiles[y * WIDTH + x];
+        let was_solid = matches!(tile, Tile::Solid { .. });
+        *tile = Tile::Empty;
+        was_solid
+    }
+
     /// Whether the tile blocks movement. Everything outside the level does.
     pub fn is_solid(&self, x: i32, y: i32) -> bool {
         if x < 0 || y < 0 || x >= WIDTH as i32 || y >= HEIGHT as i32 {
@@ -243,6 +251,14 @@ mod tests {
         let (x, y) = (x as i32, y as i32);
         assert!(world.is_solid(x, y - 1));
         assert!((y..y + 3).all(|ty| !world.is_solid(x, ty)));
+    }
+
+    #[test]
+    fn digging_empties_solid_tiles() {
+        let mut world = World::from_ascii(&["#."]);
+        assert!(world.dig(0, 0));
+        assert!(!world.is_solid(0, 0));
+        assert!(!world.dig(1, 0), "nothing to dig in an empty tile");
     }
 
     #[test]
