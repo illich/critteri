@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 bevy = "0.20"
+image = { version = "0.25", default-features = false, features = ["png"] }
+ron = "0.12"
+serde = { version = "1", features = ["derive"] }
 
 # Bevy is slow in plain debug builds: optimize our code a little, dependencies fully.
 [profile.dev]

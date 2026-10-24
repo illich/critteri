@@ -1,0 +1,26 @@
+// Biomes the level generator can place, and the materials each one is made of.
+// `background` and `materials` name textures in asset/oni/tiles/{backgrounds,materials}/.
+(
+    biomes: [
+        (
+            name: "Sandstone",
+            background: "sandstone",
+            materials: ["sandstone", "sand", "dirt", "algae", "copper_ore", "fertilizer", "granite"],
+        ),
+        (
+            name: "Frozen",
+            background: "frozen_wastes",
+            materials: ["ice", "snow", "polluted_ice", "wolframite", "igneous_rock", "sedimentary_rock"],
+        ),
+        (
+            name: "Marsh",
+            background: "boggy_marsh",
+            materials: ["slime", "algae", "clay", "gold_amalgam", "sedimentary_rock", "polluted_dirt"],
+        ),
+        (
+            name: "Volcanic",
+            background: "magma_core",
+            materials: ["igneous_rock", "obsidian", "mafic_rock", "abyssalite", "pyrite", "coal"],
+        ),
+    ],
+)

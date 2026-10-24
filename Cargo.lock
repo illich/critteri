@@ -2189,6 +2189,9 @@ name = "colony"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "image",
+ "ron",
+ "serde",
 ]
 
 [[package]]
