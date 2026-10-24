@@ -1,4 +1,5 @@
-//! Digging out tiles by holding the right mouse button, shown as spreading cracks.
+//! Changing the terrain by hand: digging tiles out by holding the right mouse
+//! button (shown as spreading cracks) and filling empty tiles by holding F.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
@@ -6,6 +7,7 @@ use image::imageops::FilterType;
 use image::{GrayImage, Luma, Rgba, RgbaImage};
 
 use crate::cursor::HoveredTile;
+use crate::player::Player;
 use crate::{
     texture_rect, tile_center, world, Level, TileGraphics, TEXTURE_PX_PER_TILE, TILE_SIZE,
     TILE_TEXTURE_DIR,
@@ -104,9 +106,7 @@ pub fn dig(
     let (x, y) = (tile.x as usize, tile.y as usize);
     if digging.elapsed >= DIG_TIME {
         level.world.dig(x, y);
-        if let Ok(mut sprite) = tile_sprites.get_mut(graphics.sprites[y * world::WIDTH + x]) {
-            *sprite = graphics.sprite(&level.world, x, y);
-        }
+        redraw_tile(&graphics, &level.world, &mut tile_sprites, x, y);
         digging.tile = None;
         *overlay_visibility = Visibility::Hidden;
         return;
@@ -121,4 +121,39 @@ pub fn dig(
     };
     overlay_transform.translation = tile_center(x, y, overlay_transform.translation.z);
     *overlay_visibility = Visibility::Visible;
+}
+
+/// Update tile `(x, y)`'s sprite after the tile changed in `world`.
+fn redraw_tile(
+    graphics: &TileGraphics,
+    world: &world::World,
+    tile_sprites: &mut Query<&mut Sprite, Without<CrackOverlay>>,
+    x: usize,
+    y: usize,
+) {
+    if let Ok(mut sprite) = tile_sprites.get_mut(graphics.sprites[y * world::WIDTH + x]) {
+        *sprite = graphics.sprite(world, x, y);
+    }
+}
+
+/// While F is held, fill the hovered empty tile, unless the player is in the way.
+pub fn fill(
+    keys: Res<ButtonInput<KeyCode>>,
+    hovered: Res<HoveredTile>,
+    player: Single<&Player>,
+    mut level: ResMut<Level>,
+    graphics: Res<TileGraphics>,
+    mut tile_sprites: Query<&mut Sprite, Without<CrackOverlay>>,
+) {
+    let Some(tile) = hovered.0.filter(|_| keys.pressed(KeyCode::KeyF)) else {
+        return;
+    };
+    if player.covers_tile(tile.x as i32, tile.y as i32) {
+        return;
+    }
+    let (x, y) = (tile.x as usize, tile.y as usize);
+    let level = &mut *level;
+    if level.world.fill(x, y, &level.biomes) {
+        redraw_tile(&graphics, &level.world, &mut tile_sprites, x, y);
+    }
 }

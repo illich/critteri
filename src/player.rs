@@ -24,6 +24,12 @@ const CELL_TILES: f32 = SHEET_CELL_PX * TILES_PER_SHEET_PX;
 const HALF_WIDTH: f32 = 0.4;
 /// Walking speed in tiles per second.
 const WALK_SPEED: f32 = 4.0;
+/// Running speed. The player starts running after walking [`RUN_AFTER`] tiles
+/// when the ground ahead stays flat and open for [`RUN_CLEARANCE`] tiles, and
+/// keeps running for as long as the direction key stays held.
+const RUN_SPEED: f32 = 2.0 * WALK_SPEED;
+const RUN_AFTER: f32 = 0.5;
+const RUN_CLEARANCE: f32 = 3.0;
 /// Highest drop, in tiles, the player walks off without holding down (S).
 const MAX_SAFE_DROP: f32 = 3.0;
 /// Gravity in tiles per second squared, and the terminal falling speed.
@@ -181,8 +187,31 @@ pub struct Player {
     fall_speed: f32,
     facing_left: bool,
     motion: Motion,
+    /// Distance walked without stopping, turning or leaving the ground, in tiles.
+    walked: f32,
+    running: bool,
+    /// Current walking or running speed; sets the pace of the walk cycle.
+    speed: f32,
     /// Where the camera should look, in world units; follows the body smoothly while leaping.
     pub focus: Vec2,
+}
+
+impl Player {
+    /// Whether tile `(x, y)` is inside the body, or inside the area it is moving
+    /// through during a climb, jump or step.
+    pub fn covers_tile(&self, x: i32, y: i32) -> bool {
+        let (end_a, end_b) = match self.motion {
+            Motion::Leap(leap) => (leap.from, leap.to),
+            Motion::StepAcross { to } => (self.position, to),
+            Motion::Idle | Motion::Walk => (self.position, self.position),
+        };
+        let (low, high) = (end_a.min(end_b).min(self.position), end_a.max(end_b).max(self.position));
+        let x0 = (low.x - HALF_WIDTH).floor() as i32;
+        let x1 = (high.x + HALF_WIDTH).ceil() as i32;
+        let y0 = low.y.floor() as i32;
+        let y1 = (high.y + HEIGHT_TILES).ceil() as i32;
+        (x0..x1).contains(&x) && (y0..y1).contains(&y)
+    }
 }
 
 #[derive(Component)]
@@ -219,6 +248,9 @@ fn spawn_player(
             fall_speed: 0.0,
             facing_left: false,
             motion: Motion::Idle,
+            walked: 0.0,
+            running: false,
+            speed: WALK_SPEED,
             focus: Vec2::ZERO,
         },
         Sprite::from_atlas_image(
@@ -249,6 +281,20 @@ fn drop_below(world: &world::World, feet: Vec2, dir: f32) -> f32 {
     let y = feet.y.floor() as i32;
     let landing = (0..=y).rev().find(|&ty| world.is_solid(x, ty - 1)).unwrap_or(0);
     feet.y - landing as f32
+}
+
+/// Whether the ground ahead of the body standing at `feet` stays flat and open
+/// for `distance` tiles in direction `dir`: solid underfoot at the same level, with
+/// 3 tiles of headroom.
+fn flat_ahead(world: &world::World, feet: Vec2, dir: f32, distance: f32) -> bool {
+    let y = feet.y.round() as i32;
+    let step = dir as i32;
+    let front = (feet.x + dir * HALF_WIDTH).floor() as i32;
+    let end = (feet.x + dir * (HALF_WIDTH + distance)).floor() as i32;
+    (0..=(end - front) * step).all(|i| {
+        let c = front + step * i;
+        world.is_solid(c, y - 1) && (y..y + 3).all(|ty| !world.is_solid(c, ty))
+    })
 }
 
 /// Whether walking from `from` to the free position `to` (direction `dir`) is
@@ -283,7 +329,12 @@ fn step(world: &world::World, blocked: Vec2, dir: f32, rise: f32) -> Option<Vec2
 fn plan_climb(world: &world::World, from: Vec2, blocked: Vec2, dir: f32) -> Option<Leap> {
     let wall_x = (blocked.x + dir * HALF_WIDTH).floor() as i32;
     let y = from.y.round() as i32;
-    let height = (0..4).take_while(|&k| world.is_solid(wall_x, y + k)).count();
+    // The top of the wall ahead, from its highest solid tile within reach: the tiles
+    // below it may be empty, as under an overhang. A solid tile 4 up is too high.
+    let height = (0..4)
+        .rev()
+        .find(|&k| world.is_solid(wall_x, y + k))
+        .map_or(0, |k| k as usize + 1);
     let (clip, cells_up) = match height {
         2 => (ClipKind::ClimbLow, 1.0),
         3 => (ClipKind::ClimbHigh, 2.0),
@@ -372,7 +423,7 @@ fn move_player(
     // Steps across, climbs and jumps run to completion without input or gravity.
     if let Motion::StepAcross { to } = player.motion {
         let remaining = to.x - player.position.x;
-        let advance = WALK_SPEED * dt;
+        let advance = player.speed * dt;
         if remaining.abs() > advance {
             player.position.x += advance * remaining.signum();
         } else {
@@ -411,9 +462,21 @@ fn move_player(
     }
 
     player.motion = Motion::Idle;
-    if dir != 0.0 {
+    // Only an uninterrupted walk keeps counting towards running.
+    let walked = std::mem::take(&mut player.walked);
+    if dir == 0.0 {
+        player.running = false;
+        player.speed = WALK_SPEED;
+    } else {
+        let turning = player.facing_left != (dir < 0.0);
         player.facing_left = dir < 0.0;
-        let target = player.position + Vec2::new(dir * WALK_SPEED * dt, 0.0);
+        let starts_running = on_ground
+            && walked >= RUN_AFTER
+            && flat_ahead(world, player.position, dir, RUN_CLEARANCE);
+        player.running = !turning && (player.running || starts_running);
+        let speed = if player.running { RUN_SPEED } else { WALK_SPEED };
+        player.speed = speed;
+        let target = player.position + Vec2::new(dir * speed * dt, 0.0);
         let wants_down = keys.any_pressed([KeyCode::KeyS, KeyCode::ArrowDown]);
         if !collides(world, target) {
             if on_ground
@@ -424,6 +487,9 @@ fn move_player(
             } else if may_walk(world, player.position, target, dir, wants_down) {
                 player.position = target;
                 player.motion = Motion::Walk;
+                if on_ground && !turning {
+                    player.walked = walked + speed * dt;
+                }
             }
         } else if on_ground
             && let Some(stepped) =
@@ -487,7 +553,7 @@ fn animate_player(
         None => {
             // The walk cycle covers one cell; play it at the speed that keeps the feet planted.
             let fps = match kind {
-                ClipKind::Walk => frames as f32 * WALK_SPEED / CELL_TILES,
+                ClipKind::Walk => frames as f32 * player.speed / CELL_TILES,
                 _ => clip.fps,
             };
             anim.elapsed = (anim.elapsed + time.delta_secs()) % (frames as f32 / fps);
@@ -725,6 +791,61 @@ mod tests {
         up.extend(ground("###.####"));
         up[3] = "....####";
         assert!(jump_right(&up).is_none());
+    }
+
+    #[test]
+    fn covers_the_body_and_the_path_of_a_leap() {
+        let mut player = Player {
+            position: Vec2::new(2.5, 1.0),
+            fall_speed: 0.0,
+            facing_left: false,
+            motion: Motion::Idle,
+            walked: 0.0,
+            running: false,
+            speed: WALK_SPEED,
+            focus: Vec2::ZERO,
+        };
+        // The body spans x 2.1-2.9 and y 1-3.7.
+        assert!(player.covers_tile(2, 1) && player.covers_tile(2, 3));
+        assert!(!player.covers_tile(2, 4) && !player.covers_tile(3, 1) && !player.covers_tile(2, 0));
+
+        player.motion = Motion::Leap(Leap {
+            clip: ClipKind::Jump,
+            from: player.position,
+            to: Vec2::new(5.5, 2.0),
+            shift: Vec2::ZERO,
+            elapsed: 0.0,
+        });
+        assert!(player.covers_tile(4, 2), "a tile on the way");
+        assert!(player.covers_tile(5, 4), "the top of the body at the landing");
+    }
+
+    #[test]
+    fn climbs_onto_overhangs() {
+        // A single tile 1 or 2 tiles above the floor, with empty tiles under it.
+        for (gap, clip) in [(1, ClipKind::ClimbLow), (2, ClipKind::ClimbHigh)] {
+            let mut level: Vec<String> = (0..6).map(|_| "........".to_string()).collect();
+            level.push("...#####".to_string());
+            level.extend((0..gap).map(|_| "........".to_string()));
+            level.push("########".to_string());
+            let leap = climb_right(&rows(&level)).expect("should climb the overhang");
+            assert!(leap.clip == clip);
+            assert_eq!(leap.to.y, 2.0 + gap as f32);
+        }
+    }
+
+    #[test]
+    fn runs_only_on_flat_open_ground() {
+        let flat = |rows: &[&str]| {
+            let world = world::World::from_ascii(rows);
+            flat_ahead(&world, Vec2::new(1.5, 1.0), 1.0, RUN_CLEARANCE)
+        };
+        assert!(flat(&["........", "........", "........", "........", "########"]));
+        assert!(!flat(&["........", "........", "........", "....#...", "########"]), "a step");
+        assert!(!flat(&["........", "........", "........", "........", "####.###"]), "a hole");
+        assert!(!flat(&["........", "....#...", "........", "........", "########"]), "low ceiling");
+        // Further than 3 tiles ahead of the body's front doesn't matter.
+        assert!(flat(&["........", "........", "........", "......#.", "########"]));
     }
 
     #[test]

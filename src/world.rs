@@ -81,6 +81,8 @@ pub struct World {
     tiles: Vec<Tile>,
     /// Index into [`Biomes::biomes`] for every tile.
     biomes: Vec<u8>,
+    /// Randomness for changes made while playing, such as the material of filled tiles.
+    rng: XorShift,
 }
 
 impl World {
@@ -117,7 +119,7 @@ impl World {
                 tile_biomes.push(biome);
             }
         }
-        Self { tiles, biomes: tile_biomes }
+        Self { tiles, biomes: tile_biomes, rng }
     }
 
     /// A level drawn in ASCII (`#` solid, anything else empty), placed in the
@@ -133,7 +135,7 @@ impl World {
                 }
             }
         }
-        Self { tiles, biomes: vec![0; WIDTH * HEIGHT] }
+        Self { tiles, biomes: vec![0; WIDTH * HEIGHT], rng: XorShift(1) }
     }
 
     /// `y = 0` is the bottom row.
@@ -151,6 +153,32 @@ impl World {
         let was_solid = matches!(tile, Tile::Solid { .. });
         *tile = Tile::Empty;
         was_solid
+    }
+
+    /// Fill an empty tile with the material of one of its solid neighbours (left,
+    /// right, below, above) at random, or if it has none, one of its biome's.
+    /// Returns whether the tile was empty.
+    pub fn fill(&mut self, x: usize, y: usize, biomes: &Biomes) -> bool {
+        if matches!(self.tile(x, y), Tile::Solid { .. }) {
+            return false;
+        }
+        let (xi, yi) = (x as i32, y as i32);
+        let neighbours: Vec<u8> = [(xi - 1, yi), (xi + 1, yi), (xi, yi - 1), (xi, yi + 1)]
+            .into_iter()
+            .filter(|&(nx, ny)| nx >= 0 && ny >= 0 && nx < WIDTH as i32 && ny < HEIGHT as i32)
+            .filter_map(|(nx, ny)| match self.tile(nx as usize, ny as usize) {
+                Tile::Solid { material } => Some(material),
+                Tile::Empty => None,
+            })
+            .collect();
+        let choices = if neighbours.is_empty() {
+            &biomes.biomes[self.biome(x, y) as usize].materials
+        } else {
+            &neighbours
+        };
+        let material = choices[self.rng.below(choices.len())];
+        self.tiles[y * WIDTH + x] = Tile::Solid { material };
+        true
     }
 
     /// Whether the tile blocks movement. Everything outside the level does.
@@ -259,6 +287,34 @@ mod tests {
         assert!(world.dig(0, 0));
         assert!(!world.is_solid(0, 0));
         assert!(!world.dig(1, 0), "nothing to dig in an empty tile");
+    }
+
+    #[test]
+    fn filling_uses_neighbouring_materials() {
+        let biomes = biomes();
+        let mut world = World::from_ascii(&["...", "#.#", "..."]);
+        // Make the two neighbours different materials.
+        world.tiles[WIDTH] = Tile::Solid { material: 3 };
+        world.tiles[WIDTH + 2] = Tile::Solid { material: 5 };
+        let mut seen = Vec::new();
+        for _ in 0..20 {
+            world.tiles[WIDTH + 1] = Tile::Empty;
+            assert!(world.fill(1, 1, &biomes));
+            let Tile::Solid { material } = world.tile(1, 1) else { panic!("should be solid") };
+            assert!(material == 3 || material == 5);
+            seen.push(material);
+        }
+        assert!(seen.contains(&3) && seen.contains(&5), "picks among neighbours at random");
+        assert!(!world.fill(1, 1, &biomes), "already solid");
+    }
+
+    #[test]
+    fn filling_without_neighbours_uses_biome_materials() {
+        let biomes = biomes();
+        let mut world = World::from_ascii(&["..."]);
+        assert!(world.fill(10, 10, &biomes));
+        let Tile::Solid { material } = world.tile(10, 10) else { panic!("should be solid") };
+        assert!(biomes.biomes[0].materials.contains(&material));
     }
 
     #[test]

@@ -65,7 +65,7 @@ fn main() {
         .add_systems(
             Update,
             (
-                (follow_player, cursor::highlight_hovered_tile, mining::dig)
+                (follow_player, cursor::highlight_hovered_tile, mining::dig, mining::fill)
                     .chain()
                     .after(player::PlayerSystems),
                 quit_on_esc,
