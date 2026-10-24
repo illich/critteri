@@ -2,6 +2,7 @@ mod world;
 
 use bevy::camera::ScalingMode;
 use bevy::prelude::*;
+use bevy::window::WindowMode;
 
 /// Size of one tile in world units.
 const TILE_SIZE: f32 = 32.0;
@@ -15,14 +16,21 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Colony".into(),
+                mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
                 ..default()
             }),
             ..default()
         }))
         .insert_resource(ClearColor(Color::BLACK))
         .add_systems(Startup, (spawn_camera, spawn_tiles))
-        .add_systems(Update, scroll_camera)
+        .add_systems(Update, (scroll_camera, quit_on_esc))
         .run();
+}
+
+fn quit_on_esc(keys: Res<ButtonInput<KeyCode>>, mut exit: MessageWriter<AppExit>) {
+    if keys.just_pressed(KeyCode::Escape) {
+        exit.write(AppExit::Success);
+    }
 }
 
 fn spawn_camera(mut commands: Commands) {
