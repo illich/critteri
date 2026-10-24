@@ -1,3 +1,4 @@
+mod building;
 mod cursor;
 mod mining;
 mod player;
@@ -60,12 +61,24 @@ fn main() {
         .init_resource::<cursor::HoveredTile>()
         .add_systems(
             Startup,
-            (spawn_camera, spawn_tiles, cursor::spawn_tile_highlight, mining::setup_digging),
+            (
+                spawn_camera,
+                spawn_tiles,
+                cursor::spawn_tile_highlight,
+                mining::setup_digging,
+                building::setup_buildings,
+            ),
         )
         .add_systems(
             Update,
             (
-                (follow_player, cursor::highlight_hovered_tile, mining::dig, mining::fill)
+                (
+                    follow_player,
+                    cursor::highlight_hovered_tile,
+                    mining::dig,
+                    mining::fill,
+                    building::place_ladder,
+                )
                     .chain()
                     .after(player::PlayerSystems),
                 quit_on_esc,

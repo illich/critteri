@@ -1,11 +1,13 @@
 //! Changing the terrain by hand: digging tiles out by holding the right mouse
-//! button (shown as spreading cracks) and filling empty tiles by holding F.
+//! button (shown as spreading cracks; buildings are removed at once) and filling
+//! empty tiles by holding F (replacing any building).
 
 use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use image::imageops::FilterType;
 use image::{GrayImage, Luma, Rgba, RgbaImage};
 
+use crate::building::BuildingSprites;
 use crate::cursor::HoveredTile;
 use crate::player::Player;
 use crate::{
@@ -77,6 +79,7 @@ fn load_crack_stages(images: &mut Assets<Image>) -> Vec<Handle<Image>> {
 
 #[expect(clippy::too_many_arguments, reason = "Bevy system parameters")]
 pub fn dig(
+    mut commands: Commands,
     buttons: Res<ButtonInput<MouseButton>>,
     time: Res<Time>,
     hovered: Res<HoveredTile>,
@@ -85,8 +88,17 @@ pub fn dig(
     graphics: Res<TileGraphics>,
     mut tile_sprites: Query<&mut Sprite, Without<CrackOverlay>>,
     overlay: Single<(&mut Sprite, &mut Transform, &mut Visibility), With<CrackOverlay>>,
+    mut building_sprites: ResMut<BuildingSprites>,
 ) {
     let (mut overlay_sprite, mut overlay_transform, mut overlay_visibility) = overlay.into_inner();
+
+    // A building in the hovered tile is removed at once.
+    if let Some(tile) = hovered.0.filter(|_| buttons.pressed(MouseButton::Right)) {
+        let (x, y) = (tile.x as usize, tile.y as usize);
+        if level.world.remove_building(x, y) {
+            building_sprites.remove(&mut commands, x, y);
+        }
+    }
 
     let target = hovered.0.filter(|tile| {
         buttons.pressed(MouseButton::Right) && level.world.is_solid(tile.x as i32, tile.y as i32)
@@ -137,13 +149,16 @@ fn redraw_tile(
 }
 
 /// While F is held, fill the hovered empty tile, unless the player is in the way.
+#[expect(clippy::too_many_arguments, reason = "Bevy system parameters")]
 pub fn fill(
+    mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     hovered: Res<HoveredTile>,
     player: Single<&Player>,
     mut level: ResMut<Level>,
     graphics: Res<TileGraphics>,
     mut tile_sprites: Query<&mut Sprite, Without<CrackOverlay>>,
+    mut building_sprites: ResMut<BuildingSprites>,
 ) {
     let Some(tile) = hovered.0.filter(|_| keys.pressed(KeyCode::KeyF)) else {
         return;
@@ -154,6 +169,7 @@ pub fn fill(
     let (x, y) = (tile.x as usize, tile.y as usize);
     let level = &mut *level;
     if level.world.fill(x, y, &level.biomes) {
+        building_sprites.remove(&mut commands, x, y);
         redraw_tile(&graphics, &level.world, &mut tile_sprites, x, y);
     }
 }

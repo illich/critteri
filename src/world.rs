@@ -77,8 +77,16 @@ pub enum Tile {
     Solid { material: u8 },
 }
 
+/// Something built in an empty tile.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Building {
+    Ladder,
+}
+
 pub struct World {
     tiles: Vec<Tile>,
+    /// What is built in each tile; only empty tiles can hold a building.
+    buildings: Vec<Option<Building>>,
     /// Index into [`Biomes::biomes`] for every tile.
     biomes: Vec<u8>,
     /// Randomness for changes made while playing, such as the material of filled tiles.
@@ -119,7 +127,7 @@ impl World {
                 tile_biomes.push(biome);
             }
         }
-        Self { tiles, biomes: tile_biomes, rng }
+        Self { tiles, buildings: vec![None; WIDTH * HEIGHT], biomes: tile_biomes, rng }
     }
 
     /// A level drawn in ASCII (`#` solid, anything else empty), placed in the
@@ -135,7 +143,12 @@ impl World {
                 }
             }
         }
-        Self { tiles, biomes: vec![0; WIDTH * HEIGHT], rng: XorShift(1) }
+        Self {
+            tiles,
+            buildings: vec![None; WIDTH * HEIGHT],
+            biomes: vec![0; WIDTH * HEIGHT],
+            rng: XorShift(1),
+        }
     }
 
     /// `y = 0` is the bottom row.
@@ -158,10 +171,12 @@ impl World {
     /// Fill an empty tile with the material of one of its solid neighbours (left,
     /// right, below, above) at random, or if it has none, one of its biome's.
     /// Returns whether the tile was empty.
+    /// A building in the tile is removed.
     pub fn fill(&mut self, x: usize, y: usize, biomes: &Biomes) -> bool {
         if matches!(self.tile(x, y), Tile::Solid { .. }) {
             return false;
         }
+        self.buildings[y * WIDTH + x] = None;
         let (xi, yi) = (x as i32, y as i32);
         let neighbours: Vec<u8> = [(xi - 1, yi), (xi + 1, yi), (xi, yi - 1), (xi, yi + 1)]
             .into_iter()
@@ -179,6 +194,37 @@ impl World {
         let material = choices[self.rng.below(choices.len())];
         self.tiles[y * WIDTH + x] = Tile::Solid { material };
         true
+    }
+
+    pub fn building(&self, x: usize, y: usize) -> Option<Building> {
+        self.buildings[y * WIDTH + x]
+    }
+
+    /// Build in an empty tile with nothing built in it yet. Returns whether it was built.
+    pub fn build(&mut self, x: usize, y: usize, building: Building) -> bool {
+        if matches!(self.tile(x, y), Tile::Solid { .. }) || self.building(x, y).is_some() {
+            return false;
+        }
+        self.buildings[y * WIDTH + x] = Some(building);
+        true
+    }
+
+    pub fn is_ladder(&self, x: i32, y: i32) -> bool {
+        (0..WIDTH as i32).contains(&x)
+            && (0..HEIGHT as i32).contains(&y)
+            && self.building(x as usize, y as usize) == Some(Building::Ladder)
+    }
+
+    /// Whether a body standing at level `y` in column `x` is held up: by a solid
+    /// tile below, or, as in ONI, by a ladder below (its top edge) or in the tile
+    /// itself (its bottom edge).
+    pub fn is_floor(&self, x: i32, y: i32) -> bool {
+        self.is_solid(x, y - 1) || self.is_ladder(x, y - 1) || self.is_ladder(x, y)
+    }
+
+    /// Remove the building in a tile. Returns whether there was one.
+    pub fn remove_building(&mut self, x: usize, y: usize) -> bool {
+        self.buildings[y * WIDTH + x].take().is_some()
     }
 
     /// Whether the tile blocks movement. Everything outside the level does.
@@ -315,6 +361,38 @@ mod tests {
         assert!(world.fill(10, 10, &biomes));
         let Tile::Solid { material } = world.tile(10, 10) else { panic!("should be solid") };
         assert!(biomes.biomes[0].materials.contains(&material));
+    }
+
+    #[test]
+    fn builds_only_in_empty_unbuilt_tiles() {
+        let mut world = World::from_ascii(&["#."]);
+        assert!(!world.build(0, 0, Building::Ladder), "solid");
+        assert!(world.build(1, 0, Building::Ladder));
+        assert_eq!(world.building(1, 0), Some(Building::Ladder));
+        assert!(!world.build(1, 0, Building::Ladder), "already built");
+        assert!(!world.is_solid(1, 0), "ladders don't block movement");
+        assert!(world.remove_building(1, 0));
+        assert_eq!(world.building(1, 0), None);
+        assert!(!world.remove_building(1, 0), "nothing left to remove");
+    }
+
+    #[test]
+    fn filling_replaces_a_building() {
+        let mut world = World::from_ascii(&["#."]);
+        world.build(1, 0, Building::Ladder);
+        assert!(world.fill(1, 0, &biomes()));
+        assert!(world.is_solid(1, 0));
+        assert_eq!(world.building(1, 0), None);
+    }
+
+    #[test]
+    fn ladders_are_floors_at_both_edges() {
+        let mut world = World::from_ascii(&["...", "...", "..."]);
+        world.build(1, 1, Building::Ladder);
+        assert!(world.is_floor(1, 2), "on top of the ladder");
+        assert!(world.is_floor(1, 1), "at the ladder's bottom edge");
+        assert!(!world.is_floor(0, 1), "not beside it");
+        assert!(world.is_floor(0, 0), "the level's bottom edge");
     }
 
     #[test]

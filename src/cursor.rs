@@ -1,4 +1,4 @@
-//! Tracks the tile under the mouse cursor and highlights it when it is solid.
+//! Tracks the tile under the mouse cursor and highlights it when it is solid or has a building.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -55,7 +55,11 @@ pub fn highlight_hovered_tile(
         });
 
     hovered.0 = tile.map(|tile| tile.as_uvec2());
-    match tile.filter(|tile| level.world.is_solid(tile.x as i32, tile.y as i32)) {
+    let worth_highlighting = |tile: &Vec2| {
+        level.world.is_solid(tile.x as i32, tile.y as i32)
+            || level.world.building(tile.x as usize, tile.y as usize).is_some()
+    };
+    match tile.filter(worth_highlighting) {
         Some(tile) => {
             transform.translation = ((tile + 0.5) * TILE_SIZE).extend(transform.translation.z);
             *visibility = Visibility::Visible;

@@ -10,31 +10,44 @@ Remote: `https://github.com/illich/critteri.git`, branch `main`.
 
 ## Commands
 
-- `cargo run`: build and launch. The window is borderless fullscreen; Esc quits, A/D (or arrows) walk the player (hold S/down to walk off cliffs higher than 3 tiles), holding the right mouse button digs the hovered tile, holding F fills the hovered empty tile, and the camera follows the player.
+- `cargo run`: build and launch (borderless fullscreen).
 - `cargo build`: the first build compiles Bevy and takes several minutes; later builds are incremental.
-- `cargo test`: run tests (world generation in `src/world.rs`, climbing in `src/player.rs`; `World::from_ascii` builds small hand-drawn test levels). Run one test with `cargo test <name>`.
-- `cargo clippy`: lint.
+- `cargo test`: run all tests; `cargo test <name>` runs matching tests. Tests live next to the code in `src/world.rs` and `src/player.rs`, and use `World::from_ascii` to build small hand-drawn levels (`#` solid, first row is the top).
+- `cargo clippy --all-targets`: lint (kept warning-free; Bevy systems with many parameters use `#[expect(clippy::too_many_arguments, ...)]`).
 
 The dev profile sets `opt-level = 1` for this crate and `3` for dependencies; Bevy is too slow in unoptimized debug builds.
 
+Controls: A/D or arrows walk (hold S/down to walk off drops over 3 tiles); W/S climb ladders; holding the right mouse button digs the hovered solid tile or removes a building; holding F fills the hovered empty tile; holding R places a ladder; Esc quits. The camera follows the player.
+
 ## Architecture
 
-- `src/world.rs`: engine-independent world data (the tile grid as a flat `Vec`, indexed `y * WIDTH + x`, with `y = 0` as the bottom row). **Keep Bevy out of this module**: the simulation (tiles, halftiles, liquids) is meant to move into its own crate later and be tested headless. Grid cells should stay plain arrays, not ECS entities.
+- `src/world.rs`: engine-independent world data. **Keep Bevy out of this module**: the simulation (tiles, halftiles, liquids) is meant to move into its own crate later and be tested headless. Grids are flat `Vec`s indexed `y * WIDTH + x` with `y = 0` the bottom row (not ECS entities): terrain (`Tile::Empty` / `Tile::Solid { material }`), a biome per tile, and a building layer (`Building::Ladder`) that only empty tiles can hold. `is_solid` blocks movement; `is_floor(x, y)` says whether a body standing at level `y` is held up (solid below, or a ladder below or in the tile itself, as in ONI) and is what all ground checks use. `World::fill` picks a random solid neighbour's material (else one of the tile's biome's) and replaces any building.
 - `asset/biomes.ron`: biome definitions (background texture plus the materials it may contain). The material list is derived from it, and only textures it names are loaded. The generator splits the level into 15-20 Voronoi sections with a random biome each; solid tiles only use their section's materials.
-- `asset/oni/`: placeholder textures extracted from the user's Oxygen Not Included install (gitignored, never publish). The extraction scripts and their Python venv are in `.tools/` (also gitignored).
-- `src/player.rs`: the player duplicant (`PlayerPlugin`): a 0.8x2.7-tile collision box with gravity and walking. Movement rules (each a small pure function with tests on `World::from_ascii` levels): `step` does instant 1-tile steps up or down needing only 3 free tiles at the destination (if the body must move fully into the next column, `Motion::StepAcross` walks it there at normal speed); `plan_climb` does animated 2-3 tile climbs (the cliff height is its highest solid tile within reach, so overhangs count); `plan_jump` does automatic jumps over 1-2 column gaps (each dropping 2+ tiles, 3 tiles of headroom from the take-off level) onto ground at the same level or one tile up or down (3 tiles of headroom above it). Climbs and jumps share `Leap`; after walking half a tile with `flat_ahead` (3 tiles of flat open ground) the player runs at double speed until the key is released or it turns; `may_walk` stops the player at drops over 3 tiles (measured 3/4 along the body, also while falling) unless S is held, but never blocks backing away. Climb animations carry the dupe a fixed distance inside the sprite (`Climb::shift`), so the sprite is offset during the climb to end exactly on the cliff top; the camera follows `Player::focus`, not the sprite. Sprite scale comes from `SHEET_HEIGHT_PX`/`SHEET_CELL_PX` (one ONI cell is 100 px in the sheets).
-- `asset/oni/player/`: the dupe (ONI's Catalina, with a slightly smiling resting mouth) pre-rendered from ONI kanim files into sprite sheets, one folder per animation group with an `animations.ron` index (frame size, grid, fps, and the feet `origin`). Regenerate with `.tools/scripts/render_dupe.py` (`--personality`, `--mouth`, `--resting-mouth`).
-- `src/cursor.rs`: tracks the tile under the mouse (`HoveredTile`) and highlights it when solid. `src/mining.rs`: holding the right button digs the hovered solid tile in 0.2 s, showing 6 crack stages generated at startup from ONI's `crackAlpha` mask (its alpha holds cracks by damage level), then swaps the tile's sprite via `TileGraphics`. Holding F fills the hovered empty tile (`World::fill`: a random solid neighbour's material, else one of its biome's), except tiles the player covers (`Player::covers_tile`, including a leap's path).
-- `src/main.rs`: the Bevy app, which handles rendering, input and the camera. The camera uses a fixed horizontal scaling so exactly `VISIBLE_TILES_X` (60) tiles span the screen width at any resolution. World units are `TILE_SIZE` (32) per tile.
-- Tiles currently render as one sprite each (`TileGraphics` keeps every tile's entity so a changed tile can be redrawn with `TileGraphics::sprite`), which is fine at the current size (180x68). When halftiles and liquids arrive (about 50k frequently changing cells), switch grid rendering to a texture or tilemap.
+- `src/main.rs`: the Bevy app: generates the `Level` resource (world + biomes) before startup, spawns tiles and the camera, and orders the per-frame systems: `PlayerSystems` first, then `follow_player` → `highlight_hovered_tile` → `dig` → `fill` → `place_ladder`. The camera uses fixed horizontal scaling so exactly `VISIBLE_TILES_X` (60) tiles span the screen; world units are `TILE_SIZE` (32) per tile. Tiles render as one sprite each; `TileGraphics` keeps every tile's entity so a changed tile is redrawn with `TileGraphics::sprite` (switch to a texture or tilemap once halftiles and liquids arrive).
+- `src/player.rs` (`PlayerPlugin`): the player duplicant, a 0.8x2.7-tile collision box. Its `Motion` is idle/walking, `StepAcross`, a `Leap` (climb or jump), or `Ladder`. Movement rules are small pure functions, each tested:
+  - `step`: instant 1-tile steps up or down needing only 3 free tiles at the destination; if the body must move fully into the next column, `StepAcross` walks it there at the current speed.
+  - `plan_climb`: animated 2-3 tile climbs (the cliff height is its highest solid tile in reach, so overhangs count).
+  - `plan_jump`: automatic jumps over 1-2 column gaps (each dropping 2+ tiles, 3 tiles of headroom from the take-off level) onto ground at the same level or one tile up or down.
+  - `may_walk` / `drop_below`: stop at drops over 3 tiles (measured 3/4 along the body, also mid-fall) unless S is held, but never block backing away. `flat_ahead`: start running (double speed) after half a tile of walking with 3 tiles of flat open ground ahead; running lasts while the key is held.
+  - `ladder_step` / `hanging_on_ladder`: ladder climbing one whole level at a time, gravity off; S on the lowest ladder tile lets go.
+  - Leap animations carry the dupe a fixed distance inside the sprite (`Leap::shift`), so the sprite is offset during the leap to end exactly at the target; the camera follows `Player::focus`, not the sprite. `Player::covers_tile` (body plus any leap/ladder path) keeps F from filling tiles the player needs.
+  - Sprite scale comes from `SHEET_HEIGHT_PX` and `SHEET_CELL_PX` (one ONI cell is 100 px in the sheets, 1.75 of our tiles); looping animations are paced from movement speed so feet don't slide.
+- `src/cursor.rs`: tracks the tile under the mouse (`HoveredTile`) and highlights it when solid or built on. `src/mining.rs`: right button digs a solid tile in 0.2 s with 6 crack stages generated at startup from ONI's `crackAlpha` mask (its alpha holds cracks by damage level), or removes a building at once; F fills. `src/building.rs`: ladder graphics, R to place, and `BuildingSprites` (each building's sprite entity, despawned on removal).
 - Characters, critters and plants are intended to be ECS entities.
+
+## Placeholder assets
+
+`asset/oni/` holds graphics extracted from the user's Oxygen Not Included install (`/m/steam/steamapps/common/OxygenNotIncluded`). It is gitignored and must never be published. The tools are in `.tools/` (also gitignored): a Python venv with UnityPy and dnfile, and scripts in `.tools/scripts/`:
+- `export_tiles.py <ONI data dir> asset/oni/tiles`: material and biome background textures, the crack mask, the ladder.
+- `kanim.py`: reader for Klei kanim build/anim files.
+- `render_dupe.py`: renders the player (ONI's Catalina, slightly smiling resting mouth) from kanim into sprite sheets in `asset/oni/player/{loco,pole,swim,idle}`, each with an `animations.ron` index (frame size, grid, fps, and the feet `origin`). Options: `--personality`, `--mouth`, `--resting-mouth`. Delete the junk animation named `" crap"` from the swim set after re-rendering.
 
 ## Bevy version notes
 
-Bevy 0.20 APIs differ from older tutorials. Examples in use: `Camera2d`, `Projection::Orthographic(OrthographicProjection { .. })` with `bevy::camera::ScalingMode`, `Sprite::from_color`, `Single<..>` queries, `MessageWriter<AppExit>` (not `EventWriter`), and `bevy::window::WindowMode` (not in the prelude). When unsure, check the crate source in `~/.cargo/registry/src/*/bevy_*-0.20*`.
+Bevy 0.20 APIs differ from older tutorials. Examples in use: `Camera2d`, `Projection::Orthographic(OrthographicProjection { .. })` with `bevy::camera::ScalingMode`, `Sprite::from_color`, `Single<..>` queries, `MessageWriter<AppExit>` (not `EventWriter`), `bevy::sprite::Anchor` as a component, and `bevy::window::WindowMode` (not in the prelude). When unsure, check the crate source in `~/.cargo/registry/src/*/bevy_*-0.20*`.
 
 ## Environment
 
-The desktop sets `SSH_ASKPASS=/usr/bin/ksshaskpass` with `SSH_ASKPASS_REQUIRE=prefer`, which intercepts git credential prompts. Credentials are stored via `credential.helper store`, so `git push` works non-interactively. If authentication ever needs re-entering, run git with `env -u SSH_ASKPASS -u SSH_ASKPASS_REQUIRE`.
-
-Never write outside the project directory (/a/work/colony) and its subdirs.
+- Visual checks: run the game in the background and capture the screen with `spectacle -b -n -f -o <file>` (writing into the project, e.g. `.tools/out/`). Sending keys with `xdotool` triggers a KDE "Remote Control" permission prompt, so don't; ask the user to try input-driven behaviour.
+- The desktop sets `SSH_ASKPASS=/usr/bin/ksshaskpass` with `SSH_ASKPASS_REQUIRE=prefer`, which intercepts git credential prompts. Credentials are stored via `credential.helper store`, so `git push` works non-interactively. If authentication ever needs re-entering, run git with `env -u SSH_ASKPASS -u SSH_ASKPASS_REQUIRE`.
+- Never write outside the project directory (/a/work/colony) and its subdirs.

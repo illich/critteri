@@ -1,4 +1,4 @@
-//! The player-controlled duplicant: walking, climbing, jumping, gravity and sprite animation.
+//! The player-controlled duplicant: walking, climbing, jumping, ladders, gravity and sprite animation.
 
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
@@ -32,6 +32,8 @@ const RUN_AFTER: f32 = 0.5;
 const RUN_CLEARANCE: f32 = 3.0;
 /// Highest drop, in tiles, the player walks off without holding down (S).
 const MAX_SAFE_DROP: f32 = 3.0;
+/// Speed on ladders in tiles per second.
+const LADDER_SPEED: f32 = 3.0;
 /// Gravity in tiles per second squared, and the terminal falling speed.
 const GRAVITY: f32 = 40.0;
 const MAX_FALL_SPEED: f32 = 20.0;
@@ -132,6 +134,10 @@ enum ClipKind {
     Jump,
     JumpUp,
     JumpDown,
+    LadderUp,
+    LadderDown,
+    /// Holding on to a ladder without climbing.
+    LadderIdle,
 }
 
 struct Clips {
@@ -142,6 +148,9 @@ struct Clips {
     jump: Clip,
     jump_up: Clip,
     jump_down: Clip,
+    ladder_up: Clip,
+    ladder_down: Clip,
+    ladder_idle: Clip,
 }
 
 impl Clips {
@@ -154,6 +163,9 @@ impl Clips {
             ClipKind::Jump => &self.jump,
             ClipKind::JumpUp => &self.jump_up,
             ClipKind::JumpDown => &self.jump_down,
+            ClipKind::LadderUp => &self.ladder_up,
+            ClipKind::LadderDown => &self.ladder_down,
+            ClipKind::LadderIdle => &self.ladder_idle,
         }
     }
 }
@@ -178,6 +190,9 @@ enum Motion {
     /// next column, through the ceiling corner the head brushes on the way.
     StepAcross { to: Vec2 },
     Leap(Leap),
+    /// On a ladder, centred in its column, climbing to the whole level `target`
+    /// (or resting there once reached). Gravity doesn't apply.
+    Ladder { target: f32 },
 }
 
 #[derive(Component)]
@@ -203,6 +218,7 @@ impl Player {
         let (end_a, end_b) = match self.motion {
             Motion::Leap(leap) => (leap.from, leap.to),
             Motion::StepAcross { to } => (self.position, to),
+            Motion::Ladder { target } => (self.position, Vec2::new(self.position.x, target)),
             Motion::Idle | Motion::Walk => (self.position, self.position),
         };
         let (low, high) = (end_a.min(end_b).min(self.position), end_a.max(end_b).max(self.position));
@@ -240,6 +256,9 @@ fn spawn_player(
         jump: load("loco", "floor_floor_2_0"),
         jump_up: load("loco", "floor_floor_2_1"),
         jump_down: load("loco", "floor_floor_2_-1"),
+        ladder_up: load("loco", "ladder_ladder_0_1_loop"),
+        ladder_down: load("loco", "ladder_ladder_0_-1_loop"),
+        ladder_idle: load("idle", "ladder_idle"),
     };
 
     commands.spawn((
@@ -272,6 +291,37 @@ fn collides(world: &world::World, feet: Vec2) -> bool {
     (x0..x1).any(|x| (y0..y1).any(|y| world.is_solid(x, y)))
 }
 
+/// The next level to climb to from whole level `level` on a ladder in `column`:
+/// up while the feet are in a ladder tile, down while there is a ladder below
+/// them, as long as the body fits there.
+fn ladder_step(world: &world::World, column: i32, level: i32, up: bool, down: bool) -> Option<f32> {
+    let fits = |level: i32| !collides(world, Vec2::new(column as f32 + 0.5, level as f32));
+    if up && world.is_ladder(column, level) && fits(level + 1) {
+        Some((level + 1) as f32)
+    } else if down && world.is_ladder(column, level - 1) && fits(level - 1) {
+        Some((level - 1) as f32)
+    } else {
+        None
+    }
+}
+
+/// Whether resting at whole level `level` in `column` means hanging on a ladder,
+/// rather than standing on the ground or on top of the ladder.
+fn hanging_on_ladder(world: &world::World, column: i32, level: i32) -> bool {
+    world.is_ladder(column, level) && !world.is_solid(column, level - 1)
+}
+
+/// The highest level the body at `x`, moving down from `from_y` to `to_y`, lands
+/// on: one with a floor under any column the body covers (see [`world::World::is_floor`]).
+fn landing(world: &world::World, x: f32, from_y: f32, to_y: f32) -> Option<f32> {
+    let x0 = (x - HALF_WIDTH).floor() as i32;
+    let x1 = (x + HALF_WIDTH).ceil() as i32;
+    (to_y.floor() as i32 + 1..=from_y.floor() as i32)
+        .rev()
+        .find(|&level| (x0..x1).any(|c| world.is_floor(c, level)))
+        .map(|level| level as f32)
+}
+
 /// How far below `feet` the ground is when walking in direction `dir`, in tiles.
 /// Measured three quarters of the way along the body, so the player stops at a
 /// cliff edge with only its leading quarter over it. The level's bottom edge
@@ -279,7 +329,7 @@ fn collides(world: &world::World, feet: Vec2) -> bool {
 fn drop_below(world: &world::World, feet: Vec2, dir: f32) -> f32 {
     let x = (feet.x + dir * HALF_WIDTH / 2.0).floor() as i32;
     let y = feet.y.floor() as i32;
-    let landing = (0..=y).rev().find(|&ty| world.is_solid(x, ty - 1)).unwrap_or(0);
+    let landing = (0..=y).rev().find(|&ty| world.is_floor(x, ty)).unwrap_or(0);
     feet.y - landing as f32
 }
 
@@ -293,7 +343,7 @@ fn flat_ahead(world: &world::World, feet: Vec2, dir: f32, distance: f32) -> bool
     let end = (feet.x + dir * (HALF_WIDTH + distance)).floor() as i32;
     (0..=(end - front) * step).all(|i| {
         let c = front + step * i;
-        world.is_solid(c, y - 1) && (y..y + 3).all(|ty| !world.is_solid(c, ty))
+        world.is_floor(c, y) && (y..y + 3).all(|ty| !world.is_solid(c, ty))
     })
 }
 
@@ -372,8 +422,8 @@ fn plan_jump(world: &world::World, from: Vec2, to: Vec2, dir: f32) -> Option<Lea
     let step = dir as i32;
     // 3 tiles of headroom in column `c` from level `level` up.
     let open = |c: i32, level: i32| (level..level + 3).all(|ty| !world.is_solid(c, ty));
-    let is_gap = |c: i32| open(c, y) && !world.is_solid(c, y - 1) && !world.is_solid(c, y - 2);
-    let is_ground = |c: i32, level: i32| open(c, level) && world.is_solid(c, level - 1);
+    let is_gap = |c: i32| open(c, y) && !world.is_floor(c, y) && !world.is_floor(c, y - 1);
+    let is_ground = |c: i32, level: i32| open(c, level) && world.is_floor(c, level);
 
     // The column under the front quarter of the body, as for cliff edges.
     let first_gap = (to.x + dir * HALF_WIDTH / 2.0).floor() as i32;
@@ -420,6 +470,39 @@ fn move_player(
     let world = &level.world;
     let dt = time.delta_secs();
 
+    let up = keys.any_pressed([KeyCode::KeyW, KeyCode::ArrowUp]);
+    let down = keys.any_pressed([KeyCode::KeyS, KeyCode::ArrowDown]);
+    let sideways = keys.any_pressed([KeyCode::KeyA, KeyCode::ArrowLeft, KeyCode::KeyD, KeyCode::ArrowRight]);
+
+    // On a ladder: finish climbing to the current level, then climb on, hang
+    // there, or get off (walking sideways, or standing on ground or the top).
+    if let Motion::Ladder { target } = player.motion {
+        let remaining = target - player.position.y;
+        let advance = LADDER_SPEED * dt;
+        if remaining.abs() > advance {
+            player.position.y += advance * remaining.signum();
+            return;
+        }
+        player.position.y = target;
+        let (column, level) = (player.position.x.floor() as i32, target as i32);
+        if !sideways {
+            if let Some(next) = ladder_step(world, column, level, up, down) {
+                player.motion = Motion::Ladder { target: next };
+                return;
+            }
+            if hanging_on_ladder(world, column, level) {
+                if down && !world.is_ladder(column, level - 1) {
+                    // Let go at the bottom end: drop just below the ladder's bottom
+                    // edge so it no longer holds the body, and fall.
+                    player.position.y -= 0.001;
+                } else {
+                    return;
+                }
+            }
+        }
+        player.motion = Motion::Idle;
+    }
+
     // Steps across, climbs and jumps run to completion without input or gravity.
     if let Motion::StepAcross { to } = player.motion {
         let remaining = to.x - player.position.x;
@@ -444,14 +527,17 @@ fn move_player(
 
     player.fall_speed = (player.fall_speed + GRAVITY * dt).min(MAX_FALL_SPEED);
     let below = player.position - Vec2::new(0.0, player.fall_speed * dt);
-    let on_ground = collides(world, below);
-    if on_ground {
-        // Land on top of the tile we would have sunk into.
-        player.position.y = below.y.floor() + 1.0;
-        player.fall_speed = 0.0;
-    } else {
-        player.position = below;
-    }
+    let on_ground = match landing(world, player.position.x, player.position.y, below.y) {
+        Some(level) => {
+            player.position.y = level;
+            player.fall_speed = 0.0;
+            true
+        }
+        None => {
+            player.position = below;
+            false
+        }
+    };
 
     let mut dir = 0.0;
     if keys.any_pressed([KeyCode::KeyA, KeyCode::ArrowLeft]) {
@@ -459,6 +545,22 @@ fn move_player(
     }
     if keys.any_pressed([KeyCode::KeyD, KeyCode::ArrowRight]) {
         dir += 1.0;
+    }
+
+    // Get on a ladder in the column under the centre of the body (W up, S down).
+    if on_ground && dir == 0.0 {
+        let column = player.position.x.floor() as i32;
+        let level = player.position.y.round() as i32;
+        let centred = Vec2::new(column as f32 + 0.5, level as f32);
+        if let Some(next) = ladder_step(world, column, level, up, down)
+            && !collides(world, centred)
+        {
+            player.position = centred;
+            player.motion = Motion::Ladder { target: next };
+            player.walked = 0.0;
+            player.running = false;
+            return;
+        }
     }
 
     player.motion = Motion::Idle;
@@ -524,6 +626,16 @@ fn animate_player(
         Motion::Walk | Motion::StepAcross { .. } => {
             (ClipKind::Walk, player.position, player.position, None)
         }
+        Motion::Ladder { target } => {
+            let kind = if target > player.position.y {
+                ClipKind::LadderUp
+            } else if target < player.position.y {
+                ClipKind::LadderDown
+            } else {
+                ClipKind::LadderIdle
+            };
+            (kind, player.position, player.position, None)
+        }
         Motion::Leap(c) => {
             let t = (c.elapsed / anim.clips.get(c.clip).duration()).min(1.0);
             let body = c.from + (c.to - c.from) * t;
@@ -554,6 +666,10 @@ fn animate_player(
             // The walk cycle covers one cell; play it at the speed that keeps the feet planted.
             let fps = match kind {
                 ClipKind::Walk => frames as f32 * player.speed / CELL_TILES,
+                // Like the walk cycle, a climbing cycle covers one cell.
+                ClipKind::LadderUp | ClipKind::LadderDown => {
+                    frames as f32 * LADDER_SPEED / CELL_TILES
+                }
                 _ => clip.fps,
             };
             anim.elapsed = (anim.elapsed + time.delta_secs()) % (frames as f32 / fps);
@@ -846,6 +962,71 @@ mod tests {
         assert!(!flat(&["........", "....#...", "........", "........", "########"]), "low ceiling");
         // Further than 3 tiles ahead of the body's front doesn't matter.
         assert!(flat(&["........", "........", "........", "......#.", "########"]));
+    }
+
+    #[test]
+    fn lands_on_ladders() {
+        let mut world = world::World::from_ascii(&["........", "........", "........", "........", "........"]);
+        world.build(3, 2, world::Building::Ladder);
+        // Falling onto the top of the ladder.
+        assert_eq!(landing(&world, 3.5, 3.2, 2.9), Some(3.0));
+        // Falling into the ladder from beside: its bottom edge holds the body.
+        assert_eq!(landing(&world, 3.5, 2.1, 1.8), Some(2.0));
+        // Missing it entirely, down to the floor at the level's bottom edge.
+        assert_eq!(landing(&world, 6.5, 3.2, 2.9), None);
+        assert_eq!(landing(&world, 6.5, 0.2, -0.1), Some(0.0));
+    }
+
+    #[test]
+    fn walks_onto_ladder_tops_without_stopping() {
+        // A 4-tile cliff bridged by a ladder top at the cliff's level.
+        let mut world = world::World::from_ascii(&["###.....", "###.....", "###.....", "###....."]);
+        world.build(3, 3, world::Building::Ladder);
+        assert_eq!(drop_below(&world, Vec2::new(2.95, 4.0), 1.0), 0.0);
+        assert!(flat_ahead(&world, Vec2::new(1.5, 4.0), 1.0, 1.0));
+    }
+
+    #[test]
+    fn climbs_ladders_up_and_down() {
+        // A ladder in column 3 from the floor (y = 0) up to y = 3; a ceiling at y = 7.
+        let mut world = world::World::from_ascii(&[
+            "########", "........", "........", "........", "........", "........", "........", "........",
+        ]);
+        for y in 0..4 {
+            world.build(3, y, world::Building::Ladder);
+        }
+        assert_eq!(ladder_step(&world, 3, 0, true, false), Some(1.0), "up from the bottom");
+        assert_eq!(ladder_step(&world, 3, 3, true, false), Some(4.0), "up onto the top");
+        assert_eq!(ladder_step(&world, 3, 4, true, false), None, "nothing more to climb");
+        assert_eq!(ladder_step(&world, 3, 4, false, true), Some(3.0), "down from the top");
+        assert_eq!(ladder_step(&world, 3, 0, false, true), None, "already at the bottom");
+        assert_eq!(ladder_step(&world, 2, 0, true, false), None, "no ladder in this column");
+
+        assert!(hanging_on_ladder(&world, 3, 2));
+        assert!(!hanging_on_ladder(&world, 3, 4), "standing on top");
+        assert!(!hanging_on_ladder(&world, 3, 0), "standing on the floor");
+    }
+
+    #[test]
+    fn letting_go_at_the_bottom_end_falls() {
+        // A ladder hanging in mid-air at y = 3-4 in column 3.
+        let mut world = world::World::from_ascii(&["........", "........", "........", "........", "........"]);
+        world.build(3, 3, world::Building::Ladder);
+        world.build(3, 4, world::Building::Ladder);
+        assert!(hanging_on_ladder(&world, 3, 3));
+        assert_eq!(ladder_step(&world, 3, 3, false, true), None, "no more ladder below");
+        // Just below the bottom edge, nothing holds the body until the floor.
+        assert_eq!(landing(&world, 3.5, 2.999, 2.9), None);
+        assert_eq!(landing(&world, 3.5, 3.0, 2.9), Some(3.0), "but resting on it does");
+    }
+
+    #[test]
+    fn does_not_climb_a_ladder_into_a_ceiling() {
+        let mut world = world::World::from_ascii(&["....", "...#", "....", "....", "...."]);
+        world.build(3, 0, world::Building::Ladder);
+        world.build(3, 1, world::Building::Ladder);
+        // From y = 1 the body would need y 2-4, but y = 3 is solid.
+        assert_eq!(ladder_step(&world, 3, 1, true, false), None);
     }
 
     #[test]
