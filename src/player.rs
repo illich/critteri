@@ -1,4 +1,4 @@
-//! The player-controlled duplicant: walking, climbing, gravity and sprite animation.
+//! The player-controlled duplicant: walking, climbing, jumping, gravity and sprite animation.
 
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
@@ -14,7 +14,7 @@ pub const HEIGHT_TILES: f32 = 2.7;
 /// sprite scale. Measured on a short-haired dupe; hair makes some a little taller.
 const SHEET_HEIGHT_PX: f32 = 154.0;
 /// Size of one ONI cell in the rendered sheets, in pixels. Animations that
-/// move the duplicant (walk cycle, climbs) move it in whole cells.
+/// move the duplicant (walk cycle, climbs, jumps) move it in whole cells.
 const SHEET_CELL_PX: f32 = 100.0;
 /// Our tiles per sheet pixel, from scaling the duplicant to [`HEIGHT_TILES`].
 const TILES_PER_SHEET_PX: f32 = HEIGHT_TILES / SHEET_HEIGHT_PX;
@@ -122,6 +122,10 @@ enum ClipKind {
     ClimbLow,
     /// Up two ONI cells, used for 3-tile cliffs.
     ClimbHigh,
+    /// Across two ONI cells, used to jump 1- and 2-tile gaps; level, up a cell, or down a cell.
+    Jump,
+    JumpUp,
+    JumpDown,
 }
 
 struct Clips {
@@ -129,6 +133,9 @@ struct Clips {
     walk: Clip,
     climb_low: Clip,
     climb_high: Clip,
+    jump: Clip,
+    jump_up: Clip,
+    jump_down: Clip,
 }
 
 impl Clips {
@@ -138,15 +145,18 @@ impl Clips {
             ClipKind::Walk => &self.walk,
             ClipKind::ClimbLow => &self.climb_low,
             ClipKind::ClimbHigh => &self.climb_high,
+            ClipKind::Jump => &self.jump,
+            ClipKind::JumpUp => &self.jump_up,
+            ClipKind::JumpDown => &self.jump_down,
         }
     }
 }
 
-/// A climb in progress. The climb animations carry the duplicant a fixed
+/// A climb or jump in progress. Their animations carry the duplicant a fixed
 /// distance (`shift`) within the sprite; the sprite itself is moved so that
 /// the animation ends exactly at `to`.
 #[derive(Clone, Copy)]
-struct Climb {
+struct Leap {
     clip: ClipKind,
     from: Vec2,
     to: Vec2,
@@ -161,7 +171,7 @@ enum Motion {
     /// Finishing a step under a low ceiling: walking at normal speed into the
     /// next column, through the ceiling corner the head brushes on the way.
     StepAcross { to: Vec2 },
-    Climb(Climb),
+    Leap(Leap),
 }
 
 #[derive(Component)]
@@ -171,7 +181,7 @@ pub struct Player {
     fall_speed: f32,
     facing_left: bool,
     motion: Motion,
-    /// Where the camera should look, in world units; follows the body smoothly while climbing.
+    /// Where the camera should look, in world units; follows the body smoothly while leaping.
     pub focus: Vec2,
 }
 
@@ -198,6 +208,9 @@ fn spawn_player(
         walk: load("loco", "floor_floor_1_0_loop"),
         climb_low: load("loco", "floor_floor_1_1"),
         climb_high: load("loco", "floor_floor_1_2"),
+        jump: load("loco", "floor_floor_2_0"),
+        jump_up: load("loco", "floor_floor_2_1"),
+        jump_down: load("loco", "floor_floor_2_-1"),
     };
 
     commands.spawn((
@@ -267,7 +280,7 @@ fn step(world: &world::World, blocked: Vec2, dir: f32, rise: f32) -> Option<Vec2
 
 /// A climb onto the cliff that blocks walking from `from` to `blocked` (direction `dir`),
 /// if the cliff is 2 or 3 tiles high and there is room on top.
-fn plan_climb(world: &world::World, from: Vec2, blocked: Vec2, dir: f32) -> Option<Climb> {
+fn plan_climb(world: &world::World, from: Vec2, blocked: Vec2, dir: f32) -> Option<Leap> {
     let wall_x = (blocked.x + dir * HALF_WIDTH).floor() as i32;
     let y = from.y.round() as i32;
     let height = (0..4).take_while(|&k| world.is_solid(wall_x, y + k)).count();
@@ -288,11 +301,60 @@ fn plan_climb(world: &world::World, from: Vec2, blocked: Vec2, dir: f32) -> Opti
         .into_iter()
         .map(|x| Vec2::new(x, top))
         .find(|&to| !collides(world, to))?;
-    Some(Climb {
+    Some(Leap {
         clip,
         from,
         to,
         shift: Vec2::new(dir, cells_up) * CELL_TILES,
+        elapsed: 0.0,
+    })
+}
+
+/// A jump over a gap of 1 or 2 columns, triggered when walking from `from` to
+/// `to` (direction `dir`) would bring the front of the body over the gap. Each gap
+/// column needs 3 tiles of headroom at the take-off level and must drop at least
+/// 2 tiles below it (a 1-tile step down is walked). The column after the gap must
+/// be ground at the same level or one tile up or down, with 3 tiles of headroom
+/// above that ground.
+fn plan_jump(world: &world::World, from: Vec2, to: Vec2, dir: f32) -> Option<Leap> {
+    let y = from.y.round() as i32;
+    let step = dir as i32;
+    // 3 tiles of headroom in column `c` from level `level` up.
+    let open = |c: i32, level: i32| (level..level + 3).all(|ty| !world.is_solid(c, ty));
+    let is_gap = |c: i32| open(c, y) && !world.is_solid(c, y - 1) && !world.is_solid(c, y - 2);
+    let is_ground = |c: i32, level: i32| open(c, level) && world.is_solid(c, level - 1);
+
+    // The column under the front quarter of the body, as for cliff edges.
+    let first_gap = (to.x + dir * HALF_WIDTH / 2.0).floor() as i32;
+    let (gap, rise) = (1..=2)
+        .flat_map(|gap| [0, 1, -1].map(move |rise| (gap, rise)))
+        .find(|&(gap, rise)| {
+            (0..gap).all(|i| is_gap(first_gap + step * i))
+                && is_ground(first_gap + step * gap, y + rise)
+        })?;
+    let landing = first_gap + step * gap;
+    let level = y + rise;
+
+    // Land where the animation naturally ends if the ground carries on that far,
+    // otherwise in the middle of the first column past the gap.
+    let ground_up_to = |x: f32| {
+        let last = (x + dir * HALF_WIDTH).floor() as i32;
+        let columns = (last - landing) * step;
+        columns >= 0 && (0..=columns).all(|i| is_ground(landing + step * i, level))
+    };
+    let natural = from.x + dir * 2.0 * CELL_TILES;
+    let centre = landing as f32 + 0.5;
+    let x = [natural, centre].into_iter().find(|&x| ground_up_to(x))?;
+    let clip = match rise {
+        1 => ClipKind::JumpUp,
+        -1 => ClipKind::JumpDown,
+        _ => ClipKind::Jump,
+    };
+    Some(Leap {
+        clip,
+        from,
+        to: Vec2::new(x, level as f32),
+        shift: Vec2::new(dir * 2.0, rise as f32) * CELL_TILES,
         elapsed: 0.0,
     })
 }
@@ -307,7 +369,7 @@ fn move_player(
     let world = &level.world;
     let dt = time.delta_secs();
 
-    // Steps across and climbs run to completion without input or gravity.
+    // Steps across, climbs and jumps run to completion without input or gravity.
     if let Motion::StepAcross { to } = player.motion {
         let remaining = to.x - player.position.x;
         let advance = WALK_SPEED * dt;
@@ -319,10 +381,10 @@ fn move_player(
         }
         return;
     }
-    if let Motion::Climb(mut climb) = player.motion {
+    if let Motion::Leap(mut climb) = player.motion {
         climb.elapsed += dt;
         if climb.elapsed < anim.clips.get(climb.clip).duration() {
-            player.motion = Motion::Climb(climb);
+            player.motion = Motion::Leap(climb);
             return;
         }
         player.position = climb.to;
@@ -354,7 +416,12 @@ fn move_player(
         let target = player.position + Vec2::new(dir * WALK_SPEED * dt, 0.0);
         let wants_down = keys.any_pressed([KeyCode::KeyS, KeyCode::ArrowDown]);
         if !collides(world, target) {
-            if may_walk(world, player.position, target, dir, wants_down) {
+            if on_ground
+                && !wants_down
+                && let Some(jump) = plan_jump(world, player.position, target, dir)
+            {
+                player.motion = Motion::Leap(jump);
+            } else if may_walk(world, player.position, target, dir, wants_down) {
                 player.position = target;
                 player.motion = Motion::Walk;
             }
@@ -375,7 +442,7 @@ fn move_player(
         } else if on_ground
             && let Some(climb) = plan_climb(world, player.position, target, dir)
         {
-            player.motion = Motion::Climb(climb);
+            player.motion = Motion::Leap(climb);
         }
     }
 }
@@ -391,7 +458,7 @@ fn animate_player(
         Motion::Walk | Motion::StepAcross { .. } => {
             (ClipKind::Walk, player.position, player.position, None)
         }
-        Motion::Climb(c) => {
+        Motion::Leap(c) => {
             let t = (c.elapsed / anim.clips.get(c.clip).duration()).min(1.0);
             let body = c.from + (c.to - c.from) * t;
             (c.clip, body - c.shift * t, body, Some(t))
@@ -437,7 +504,7 @@ mod tests {
     use super::*;
 
     /// Walk right from x = 1.5 on the floor (row y = 0) into the cliff at x = 3.
-    fn climb_right(rows: &[&str]) -> Option<Climb> {
+    fn climb_right(rows: &[&str]) -> Option<Leap> {
         let world = world::World::from_ascii(rows);
         let from = Vec2::new(2.55, 1.0);
         let blocked = from + Vec2::new(0.1, 0.0);
@@ -584,6 +651,80 @@ mod tests {
         let world = step_then_cliff();
         let from = Vec2::new(4.3, 4.0);
         assert!(may_walk(&world, from, from - Vec2::new(0.1, 0.0), -1.0, false));
+    }
+
+    /// Walking right on ground whose surface is at y = 3 (columns 0-2), with the
+    /// front quarter of the body just reaching column 3.
+    fn jump_right(rows: &[&str]) -> Option<Leap> {
+        let world = world::World::from_ascii(rows);
+        let from = Vec2::new(2.75, 3.0);
+        assert!(!collides(&world, from), "the start should fit");
+        plan_jump(&world, from, from + Vec2::new(0.1, 0.0), 1.0)
+    }
+
+    /// Open space above ground at y = 0-2, with `ground` as each ground row.
+    fn ground(ground: &str) -> Vec<&str> {
+        vec!["........", "........", "........", ground, ground, ground]
+    }
+
+    #[test]
+    fn jumps_one_and_two_tile_gaps() {
+        let jump = jump_right(&ground("###.####")).expect("should jump a 1-tile gap");
+        assert!(jump.clip == ClipKind::Jump);
+        assert_eq!(jump.to.y, 3.0);
+        assert!(jump.to.x - HALF_WIDTH >= 4.0, "lands past the gap");
+
+        let jump = jump_right(&ground("###..###")).expect("should jump a 2-tile gap");
+        assert!(jump.to.x - HALF_WIDTH >= 5.0, "lands past the gap");
+    }
+
+    #[test]
+    fn lands_where_the_animation_ends_if_the_ground_continues() {
+        let jump = jump_right(&ground("###.####")).unwrap();
+        assert_eq!(jump.to.x, 2.75 + 2.0 * CELL_TILES);
+        // Another hole further on: land on the first column past the gap instead.
+        let jump = jump_right(&ground("###.##.#")).unwrap();
+        assert_eq!(jump.to.x, 4.5);
+    }
+
+    #[test]
+    fn does_not_jump_a_step_down_a_wide_gap_or_without_room() {
+        let mut step_down = ground("###.####");
+        step_down[4] = "########";
+        assert!(jump_right(&step_down).is_none(), "a 1-tile step down is walked");
+        assert!(jump_right(&ground("###...##")).is_none(), "a 3-tile gap is too wide");
+        let mut low = ground("###.####");
+        low[0] = "....#...";
+        assert!(jump_right(&low).is_none(), "only 2 tiles of headroom past the gap");
+        let mut two_up = ground("###.####");
+        two_up[1] = "....####";
+        two_up[2] = "....####";
+        assert!(jump_right(&two_up).is_none(), "the far side is 2 tiles higher");
+    }
+
+    #[test]
+    fn jumps_one_tile_up_or_down() {
+        let mut up = vec!["........"];
+        up.extend(ground("###.####"));
+        up[3] = "....####";
+        let jump = jump_right(&up).expect("should jump up");
+        assert!(jump.clip == ClipKind::JumpUp);
+        assert_eq!(jump.to.y, 4.0);
+
+        let mut down = ground("###.####");
+        down[3] = "###.....";
+        let jump = jump_right(&down).expect("should jump down");
+        assert!(jump.clip == ClipKind::JumpDown);
+        assert_eq!(jump.to.y, 2.0);
+    }
+
+    #[test]
+    fn jumping_up_needs_room_above_the_landing() {
+        // Enough room at the take-off level over the gap, but not above the higher landing.
+        let mut up = vec!["....#..."];
+        up.extend(ground("###.####"));
+        up[3] = "....####";
+        assert!(jump_right(&up).is_none());
     }
 
     #[test]
