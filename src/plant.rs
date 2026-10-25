@@ -1,12 +1,13 @@
 //! Wild plants: ONI species growing on the ground of their biome. How far a
 //! plant has grown shows in its look (ONI's growth stages); grown plants sway,
 //! and clicking one with the right mouse button harvests it into the inventory
-//! (one unit of its produce), after which it grows again. A plant dies when its floor is dug out or its tile filled.
+//! (one unit of its produce), after which it grows again; hungry critters eat
+//! ripe plants too. A plant dies when its floor is dug out or its tile filled.
 
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
 
-use crate::cursor::HoveredTile;
+use crate::cursor::{HoveredTile, HIGHLIGHT};
 use crate::inventory::{Inventory, BITS_PER_TILE};
 use crate::player::TILES_PER_SHEET_PX;
 use crate::sheet::{load_clip, Clip};
@@ -19,6 +20,8 @@ const SPACING: i32 = 3;
 const GROW_TIME: (f32, f32) = (90.0, 240.0);
 /// Depth: in front of the tiles and the tile highlight, behind critters and the player.
 const PLANT_Z: f32 = 0.6;
+/// Depth of the highlight behind a hovered ripe plant.
+const HIGHLIGHT_Z: f32 = 0.55;
 
 pub struct PlantPlugin;
 
@@ -26,7 +29,9 @@ impl Plugin for PlantPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_plants).add_systems(
             Update,
-            (harvest_plants, grow_plants, animate_plants).chain().after(crate::mining::dig),
+            (harvest_plants, grow_plants, animate_plants, highlight_ripe_plant)
+                .chain()
+                .after(crate::mining::dig),
         );
     }
 }
@@ -41,6 +46,17 @@ struct Species {
     harvest: Clip,
     headroom: i32,
 }
+
+impl Species {
+    /// Tiles a grown plant covers, for pointing at it.
+    fn height(&self) -> i32 {
+        self.headroom.max(1)
+    }
+}
+
+/// The highlight behind a hovered ripe plant, showing it can be harvested.
+#[derive(Component)]
+struct RipeHighlight;
 
 /// Every plant species, indexed like [`world::Biomes::plants`].
 #[derive(Resource)]
@@ -79,6 +95,21 @@ impl Plant {
             Stage::Harvested(t) if t + dt >= harvest => Stage::Growing(0.0),
             Stage::Harvested(t) => Stage::Harvested(t + dt),
         };
+    }
+
+    /// Whether the plant is ripe and grows in `tile`.
+    pub fn ripe_at(&self, tile: IVec2) -> bool {
+        self.stage == Stage::Grown && self.tile == tile
+    }
+
+    /// A critter eats the ripe plant: like a harvest, it starts growing again.
+    pub fn eat(&mut self) {
+        self.stage = Stage::Harvested(0.0);
+    }
+
+    /// Whether tile `tile` is part of the plant, `height` tiles tall.
+    fn covers(&self, tile: IVec2, height: i32) -> bool {
+        tile.x == self.tile.x && (self.tile.y..self.tile.y + height).contains(&tile.y)
     }
 
     /// Whether the plant still has its floor and its tile is free.
@@ -169,6 +200,7 @@ fn spawn_plants(
             .with_scale(Vec3::new(TILE_SIZE * TILES_PER_SHEET_PX, TILE_SIZE * TILES_PER_SHEET_PX, 1.0)),
         ));
     }
+    commands.spawn((RipeHighlight, Sprite::from_color(HIGHLIGHT, Vec2::ONE), Visibility::Hidden));
     commands.insert_resource(PlantGraphics { species });
 }
 
@@ -185,11 +217,7 @@ fn harvest_plants(
     };
     let tile = tile.as_ivec2();
     for mut plant in &mut plants {
-        let height = graphics.species[plant.species].headroom.max(1);
-        if plant.stage == Stage::Grown
-            && tile.x == plant.tile.x
-            && (plant.tile.y..plant.tile.y + height).contains(&tile.y)
-        {
+        if plant.stage == Stage::Grown && plant.covers(tile, graphics.species[plant.species].height()) {
             plant.stage = Stage::Harvested(0.0);
             let produce = inventory.produce(plant.species);
             inventory.add(produce, BITS_PER_TILE);
@@ -240,6 +268,32 @@ fn animate_plants(
         if let Some(atlas) = &mut sprite.texture_atlas {
             atlas.index = frame.min(clip.frames - 1);
         }
+    }
+}
+
+/// Highlight the column a hovered ripe plant covers.
+fn highlight_ripe_plant(
+    hovered: Res<HoveredTile>,
+    graphics: Res<PlantGraphics>,
+    plants: Query<&Plant>,
+    highlight: Single<(&mut Transform, &mut Visibility), With<RipeHighlight>>,
+) {
+    let (mut transform, mut visibility) = highlight.into_inner();
+    let ripe = hovered.0.and_then(|tile| {
+        plants.iter().find(|plant| {
+            plant.stage == Stage::Grown
+                && plant.covers(tile.as_ivec2(), graphics.species[plant.species].height())
+        })
+    });
+    match ripe {
+        Some(plant) => {
+            let height = graphics.species[plant.species].height() as f32;
+            let centre = Vec2::new(plant.tile.x as f32 + 0.5, plant.tile.y as f32 + height / 2.0);
+            *transform = Transform::from_translation((centre * TILE_SIZE).extend(HIGHLIGHT_Z))
+                .with_scale(Vec3::new(TILE_SIZE, height * TILE_SIZE, 1.0));
+            *visibility = Visibility::Visible;
+        }
+        None => *visibility = Visibility::Hidden,
     }
 }
 

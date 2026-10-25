@@ -6,7 +6,7 @@ use bevy::window::PrimaryWindow;
 use crate::{world, Level, TILE_SIZE};
 
 /// Colour laid over the hovered tile.
-const HIGHLIGHT: Color = Color::srgba(1.0, 1.0, 1.0, 0.18);
+pub const HIGHLIGHT: Color = Color::srgba(1.0, 1.0, 1.0, 0.18);
 
 #[derive(Component)]
 pub struct TileHighlight;

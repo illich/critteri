@@ -1,11 +1,13 @@
 //! Critters living in the level: ONI Hatches that wander along the ground,
 //! stop now and then to look around or groom, get excited when the player comes
 //! close, and fall when their floor is dug out. Some start as babies (smaller,
-//! slower, napping instead of grooming) and grow up after a while.
+//! slower, napping instead of grooming) and grow up after a while. Now and
+//! then a Hatch gets hungry and eats the next ripe plant it walks past.
 
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
 
+use crate::plant::Plant;
 use crate::player::{Player, PlayerSystems, CELL_TILES, TILES_PER_SHEET_PX};
 use crate::sheet::{load_clip, Clip};
 use crate::{world, Level, TILE_SIZE};
@@ -33,6 +35,9 @@ const REST_TIME: (f32, f32) = (1.5, 4.0);
 const GROOM_SHARE: f32 = 0.35;
 /// How close (horizontally, and vertically) the player must be for a resting Hatch to notice them.
 const NOTICE_DISTANCE: Vec2 = Vec2::new(3.5, 2.0);
+/// Time a Hatch stays fed after eating, in seconds (min..max), and how long eating takes.
+const FED_TIME: (f32, f32) = (40.0, 120.0);
+const EAT_TIME: f32 = 3.0;
 /// Depth: just behind the player.
 const CRITTER_Z: f32 = 0.9;
 
@@ -41,7 +46,10 @@ pub struct CritterPlugin;
 impl Plugin for CritterPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_hatches)
-            .add_systems(Update, (move_critters, animate_critters).chain().after(PlayerSystems));
+            .add_systems(
+                Update,
+                (move_critters, graze, animate_critters).chain().after(PlayerSystems),
+            );
     }
 }
 
@@ -50,6 +58,8 @@ enum Activity {
     Walk,
     Idle,
     Groom,
+    /// Eating a plant, for this long so far.
+    Eat(f32),
 }
 
 /// Stage of life.
@@ -73,6 +83,8 @@ pub struct Critter {
     excited: bool,
     /// Time left in the current activity.
     remaining: f32,
+    /// Time until it gets hungry.
+    fed: f32,
     life: Life,
     rng: world::XorShift,
 }
@@ -136,6 +148,19 @@ impl Critter {
             Life::Adult => {}
         }
 
+        self.fed -= dt;
+        if let Activity::Eat(t) = self.activity {
+            if t + dt < EAT_TIME {
+                self.activity = Activity::Eat(t + dt);
+                return;
+            }
+            // Done: rest a little.
+            self.activity = Activity::Idle;
+            self.remaining = self.random_time(REST_TIME);
+            self.fed = self.random_time(FED_TIME);
+            return;
+        }
+
         self.remaining -= dt;
         if self.remaining <= 0.0 {
             self.decide();
@@ -152,13 +177,25 @@ impl Critter {
     /// A resting Hatch with the player (feet at `player`) close by turns to them, excited.
     fn notice(&mut self, player: Vec2) {
         let offset = player - self.position;
-        self.excited = self.activity != Activity::Walk
+        self.excited = matches!(self.activity, Activity::Idle | Activity::Groom)
             && !self.falling()
             && !matches!(self.life, Life::GrowingUp(_))
             && offset.abs().cmple(NOTICE_DISTANCE).all();
         if self.excited && offset.x.abs() > 0.3 {
             self.facing_left = offset.x < 0.0;
         }
+    }
+
+    /// Whether it would stop to eat a ripe plant under it.
+    fn hungry(&self) -> bool {
+        self.fed <= 0.0
+            && self.activity == Activity::Walk
+            && !self.falling()
+            && !matches!(self.life, Life::GrowingUp(_))
+    }
+
+    fn start_eating(&mut self) {
+        self.activity = Activity::Eat(0.0);
     }
 
     /// Pick what to do next: alternate walking (in a random direction) and resting.
@@ -234,6 +271,8 @@ struct HatchClips {
     groom: Clip,
     fall: Clip,
     excited: Clip,
+    /// Starting to eat, eating (looped), finishing.
+    eat: [Clip; 3],
 }
 
 /// Adult and baby Hatch animations (a baby naps where an adult grooms, and
@@ -261,6 +300,8 @@ enum ClipKind {
     Excited,
     /// Growing up: the baby's part (0) or the adult's (1).
     GrowUp(usize),
+    /// Eating: starting (0), eating (1) or finishing (2).
+    Eat(usize),
 }
 
 impl HatchClips {
@@ -271,6 +312,7 @@ impl HatchClips {
             ClipKind::Groom => &self.groom,
             ClipKind::Fall => &self.fall,
             ClipKind::Excited => &self.excited,
+            ClipKind::Eat(part) => &self.eat[part],
             ClipKind::GrowUp(_) => unreachable!("growing up isn't a baby or adult animation"),
         }
     }
@@ -299,6 +341,7 @@ fn spawn_hatches(
             groom: load("hatch", "grooming_loop"),
             fall: load("hatch", "fall"),
             excited: load("hatch", "excited_loop"),
+            eat: ["eat_pre", "eat_loop", "eat_pst"].map(|name| load("hatch", name)),
         },
         baby: HatchClips {
             idle: load("baby_hatch", "idle_loop"),
@@ -306,6 +349,7 @@ fn spawn_hatches(
             groom: load("baby_hatch", "sleep_loop"),
             fall: load("baby_hatch", "fall"),
             excited: load("baby_hatch", "call_loop"),
+            eat: ["eat_pre", "eat_loop", "eat_pst"].map(|name| load("baby_hatch", name)),
         },
         grow_up: [load("baby_hatch", "growup_pre"), load("hatch", "growup_pst")],
     };
@@ -338,6 +382,7 @@ fn spawn_hatches(
                 activity: Activity::Idle,
                 excited: false,
                 remaining: 0.5 + rng.next_f32() * REST_TIME.1,
+                fed: rng.next_f32() * FED_TIME.1,
                 life,
                 rng: world::XorShift::new(rng.below(1 << 30) as u64 + 1),
             },
@@ -372,6 +417,20 @@ fn move_critters(
     }
 }
 
+/// Hungry critters walking over a ripe plant stop and eat it.
+fn graze(mut critters: Query<&mut Critter>, mut plants: Query<&mut Plant>) {
+    for mut critter in &mut critters {
+        if !critter.hungry() {
+            continue;
+        }
+        let tile = critter.position.floor().as_ivec2();
+        if let Some(mut plant) = plants.iter_mut().find(|plant| plant.ripe_at(tile)) {
+            plant.eat();
+            critter.start_eating();
+        }
+    }
+}
+
 fn animate_critters(
     time: Res<Time>,
     graphics: Res<CritterGraphics>,
@@ -379,8 +438,13 @@ fn animate_critters(
 ) {
     let scale = TILE_SIZE * TILES_PER_SHEET_PX;
     for (critter, mut anim, mut sprite, mut anchor, mut transform) in &mut critters {
+        let baby = critter.baby();
+        let clips = if baby { &graphics.baby } else { &graphics.adult };
         let kind = match (critter.life, critter.activity) {
             (_, _) if critter.falling() => ClipKind::Fall,
+            (_, Activity::Eat(t)) if t < clips.eat[0].duration() => ClipKind::Eat(0),
+            (_, Activity::Eat(t)) if t >= EAT_TIME - clips.eat[2].duration() => ClipKind::Eat(2),
+            (_, Activity::Eat(_)) => ClipKind::Eat(1),
             (Life::GrowingUp(t), _) => {
                 ClipKind::GrowUp(usize::from(t >= graphics.grow_up[0].duration()))
             }
@@ -389,11 +453,9 @@ fn animate_critters(
             (_, Activity::Idle) => ClipKind::Idle,
             (_, Activity::Groom) => ClipKind::Groom,
         };
-        let baby = critter.baby();
         let clip = match kind {
             ClipKind::GrowUp(part) => &graphics.grow_up[part],
-            _ if baby => graphics.baby.get(kind),
-            _ => graphics.adult.get(kind),
+            _ => clips.get(kind),
         };
         if anim.showing != kind || anim.baby != baby {
             anim.showing = kind;
@@ -408,6 +470,12 @@ fn animate_critters(
             ClipKind::GrowUp(part) => {
                 let Life::GrowingUp(t) = critter.life else { unreachable!() };
                 let start = if part == 1 { graphics.grow_up[0].duration() } else { 0.0 };
+                (((t - start) * clip.fps) as usize).min(clip.frames - 1)
+            }
+            // Starting and finishing to eat play once, finishing just as eating ends.
+            ClipKind::Eat(part @ (0 | 2)) => {
+                let Activity::Eat(t) = critter.activity else { unreachable!() };
+                let start = if part == 2 { EAT_TIME - clip.duration() } else { 0.0 };
                 (((t - start) * clip.fps) as usize).min(clip.frames - 1)
             }
             _ => {
@@ -486,6 +554,7 @@ mod tests {
                 activity: Activity::Idle,
                 excited: false,
                 remaining: 0.0,
+                fed: 1000.0,
                 life: Life::Adult,
                 rng: world::XorShift::new(i as u64 + 1),
             };
@@ -512,6 +581,7 @@ mod tests {
             activity: Activity::Idle,
             excited: false,
             remaining: 1.0,
+            fed: 1000.0,
             life: Life::Adult,
             rng: world::XorShift::new(1),
         };
@@ -534,6 +604,7 @@ mod tests {
             activity: Activity::Walk,
             excited: false,
             remaining: 100.0,
+            fed: 1000.0,
             life: Life::Baby { age: 0.0, grown_at: 1.0 },
             rng: world::XorShift::new(1),
         };
@@ -546,6 +617,33 @@ mod tests {
         assert_eq!(hatch.position, at, "stands still while growing up");
         hatch.update(&world, 1.0, 2.0);
         assert_eq!(hatch.life, Life::Adult);
+    }
+
+    #[test]
+    fn eats_when_hungry_then_rests() {
+        let world = world::World::from_ascii(&["......", "......", "......", "######"]);
+        let mut hatch = Critter {
+            position: Vec2::new(2.5, 1.0),
+            fall_speed: 0.0,
+            facing_left: false,
+            activity: Activity::Walk,
+            excited: false,
+            remaining: 100.0,
+            fed: 0.5,
+            life: Life::Adult,
+            rng: world::XorShift::new(1),
+        };
+        assert!(!hatch.hungry());
+        hatch.update(&world, 0.5, 2.0);
+        assert!(hatch.hungry());
+        hatch.start_eating();
+        let at = hatch.position;
+        hatch.update(&world, EAT_TIME / 2.0, 2.0);
+        assert_eq!(hatch.position, at, "stands still while eating");
+        assert!(!hatch.hungry());
+        hatch.update(&world, EAT_TIME / 2.0, 2.0);
+        assert_eq!(hatch.activity, Activity::Idle);
+        assert!(hatch.fed >= FED_TIME.0, "fed again");
     }
 
     #[test]
