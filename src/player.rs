@@ -18,7 +18,7 @@ const SHEET_CELL_PX: f32 = 100.0;
 /// Effects rendered at the same kanim scale use it too.
 pub const TILES_PER_SHEET_PX: f32 = HEIGHT_TILES / SHEET_HEIGHT_PX;
 /// One ONI cell in our tiles.
-const CELL_TILES: f32 = SHEET_CELL_PX * TILES_PER_SHEET_PX;
+pub const CELL_TILES: f32 = SHEET_CELL_PX * TILES_PER_SHEET_PX;
 /// Half the width of the collision box, in tiles. Its height is [`HEIGHT_TILES`].
 const HALF_WIDTH: f32 = 0.4;
 /// Walking speed in tiles per second.

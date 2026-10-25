@@ -1,4 +1,5 @@
 mod building;
+mod critter;
 mod cursor;
 mod inventory;
 mod mining;
@@ -57,7 +58,7 @@ fn main() {
                     ..default()
                 }),
         )
-        .add_plugins(player::PlayerPlugin)
+        .add_plugins((player::PlayerPlugin, critter::CritterPlugin))
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(inventory::Inventory::new(biomes.materials.len()))
         .insert_resource(Level { world, biomes })

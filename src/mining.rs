@@ -9,6 +9,7 @@ use image::imageops::FilterType;
 use image::{GrayImage, Luma, Rgba, RgbaImage};
 
 use crate::building::BuildingSprites;
+use crate::critter::Critter;
 use crate::cursor::HoveredTile;
 use crate::inventory::{Inventory, UNITS_PER_TILE};
 use crate::player::{Player, TILES_PER_SHEET_PX};
@@ -233,13 +234,14 @@ fn redraw_tile(
     }
 }
 
-/// While F is held, fill the hovered empty tile, unless the player is in the way.
+/// While F is held, fill the hovered empty tile, unless the player or a critter is in the way.
 #[expect(clippy::too_many_arguments, reason = "Bevy system parameters")]
 pub fn fill(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     hovered: Res<HoveredTile>,
     player: Single<&Player>,
+    critters: Query<&Critter>,
     mut level: ResMut<Level>,
     graphics: Res<TileGraphics>,
     mut tile_sprites: Query<&mut Sprite, Without<CrackOverlay>>,
@@ -248,7 +250,8 @@ pub fn fill(
     let Some(tile) = hovered.0.filter(|_| keys.pressed(KeyCode::KeyF)) else {
         return;
     };
-    if player.covers_tile(tile.x as i32, tile.y as i32) {
+    let (tx, ty) = (tile.x as i32, tile.y as i32);
+    if player.covers_tile(tx, ty) || critters.iter().any(|critter| critter.covers_tile(tx, ty)) {
         return;
     }
     let (x, y) = (tile.x as usize, tile.y as usize);

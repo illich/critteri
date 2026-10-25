@@ -98,7 +98,7 @@ impl World {
     /// a random biome. A finer Voronoi of regions decides caves and materials;
     /// a region crossing a section border takes that section's materials.
     pub fn generate(seed: u64, biomes: &Biomes) -> Self {
-        let mut rng = XorShift(seed.max(1));
+        let mut rng = XorShift::new(seed);
 
         let section_count = SECTIONS.start() + rng.below(SECTIONS.end() - SECTIONS.start() + 1);
         let sections: Vec<_> = (0..section_count)
@@ -264,9 +264,13 @@ fn nearest<T: Copy>(sites: &[((usize, usize), T)], x: usize, y: usize) -> T {
 }
 
 /// Tiny deterministic PRNG, good enough for placeholder content.
-struct XorShift(u64);
+pub struct XorShift(u64);
 
 impl XorShift {
+    pub fn new(seed: u64) -> Self {
+        Self(seed.max(1))
+    }
+
     fn next_u64(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
@@ -274,11 +278,13 @@ impl XorShift {
         self.0
     }
 
-    fn next_f32(&mut self) -> f32 {
+    /// A number in `0.0..1.0`.
+    pub fn next_f32(&mut self) -> f32 {
         (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
     }
 
-    fn below(&mut self, n: usize) -> usize {
+    /// A number in `0..n`.
+    pub fn below(&mut self, n: usize) -> usize {
         (self.next_u64() % n as u64) as usize
     }
 
