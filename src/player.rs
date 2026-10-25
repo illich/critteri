@@ -305,6 +305,16 @@ fn ladder_step(world: &world::World, column: i32, level: i32, up: bool, down: bo
     }
 }
 
+/// The level to reach up to from the ground at whole level `level` for a ladder
+/// in `column` whose bottom is 1 or 2 tiles above the feet: the bottom ladder
+/// tile's level, as long as the body fits there.
+fn ladder_reach(world: &world::World, column: i32, level: i32) -> Option<f32> {
+    (level + 1..=level + 2)
+        .find(|&y| world.is_ladder(column, y))
+        .filter(|&y| !collides(world, Vec2::new(column as f32 + 0.5, y as f32)))
+        .map(|y| y as f32)
+}
+
 /// Whether resting at whole level `level` in `column` means hanging on a ladder,
 /// rather than standing on the ground or on top of the ladder.
 fn hanging_on_ladder(world: &world::World, column: i32, level: i32) -> bool {
@@ -547,12 +557,14 @@ fn move_player(
         dir += 1.0;
     }
 
-    // Get on a ladder in the column under the centre of the body (W up, S down).
+    // Get on a ladder in the column under the centre of the body (W up, S down),
+    // reaching up to one whose bottom is up to 2 tiles above the feet.
     if on_ground && dir == 0.0 {
         let column = player.position.x.floor() as i32;
         let level = player.position.y.round() as i32;
         let centred = Vec2::new(column as f32 + 0.5, level as f32);
         if let Some(next) = ladder_step(world, column, level, up, down)
+            .or_else(|| ladder_reach(world, column, level).filter(|_| up))
             && !collides(world, centred)
         {
             player.position = centred;
@@ -1018,6 +1030,22 @@ mod tests {
         // Just below the bottom edge, nothing holds the body until the floor.
         assert_eq!(landing(&world, 3.5, 2.999, 2.9), None);
         assert_eq!(landing(&world, 3.5, 3.0, 2.9), Some(3.0), "but resting on it does");
+    }
+
+    #[test]
+    fn reaches_up_to_ladders_above_the_ground() {
+        // Ladders in columns 2, 4 and 6 whose bottoms are 1, 2 and 3 tiles above the floor.
+        let mut world = world::World::from_ascii(&["........"; 9].into_iter().chain(["########"]).collect::<Vec<_>>());
+        for (column, bottom) in [(2, 2), (4, 3), (6, 4)] {
+            for y in bottom..bottom + 3 {
+                world.build(column, y, world::Building::Ladder);
+            }
+        }
+        assert_eq!(ladder_reach(&world, 2, 1), Some(2.0), "1 tile up");
+        assert_eq!(ladder_reach(&world, 4, 1), Some(3.0), "2 tiles up");
+        assert_eq!(ladder_reach(&world, 6, 1), None, "3 tiles up is out of reach");
+        assert_eq!(ladder_reach(&world, 3, 1), None, "no ladder in this column");
+        assert!(hanging_on_ladder(&world, 4, 3), "hangs once there");
     }
 
     #[test]
