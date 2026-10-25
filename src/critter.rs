@@ -1,6 +1,7 @@
 //! Critters living in the level: ONI Hatches that wander along the ground,
 //! stop now and then to look around or groom, get excited when the player comes
-//! close, and fall when their floor is dug out.
+//! close, and fall when their floor is dug out. Some start as babies (smaller,
+//! slower, napping instead of grooming) and grow up after a while.
 
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
@@ -9,8 +10,13 @@ use crate::player::{Player, PlayerSystems, CELL_TILES, TILES_PER_SHEET_PX};
 use crate::sheet::{load_clip, Clip};
 use crate::{world, Level, TILE_SIZE};
 
-/// How many Hatches live in the level.
+/// How many Hatches live in the level; every `BABY_EVERY`th starts as a baby.
 const HATCH_COUNT: usize = 15;
+const BABY_EVERY: usize = 3;
+/// How long a baby takes to grow up, in seconds (min..max).
+const GROW_UP_TIME: (f32, f32) = (60.0, 240.0);
+/// A baby's walking speed relative to an adult's.
+const BABY_SPEED: f32 = 0.65;
 /// Height of a Hatch's body, in tiles: it needs two free tiles to fit.
 const BODY_HEIGHT: f32 = 1.4;
 /// How far ahead of its centre a Hatch checks for walls and edges, in tiles.
@@ -46,6 +52,16 @@ enum Activity {
     Groom,
 }
 
+/// Stage of life.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Life {
+    /// A baby, growing up once `age` reaches `grown_at` seconds.
+    Baby { age: f32, grown_at: f32 },
+    /// Playing the grow-up animation, for this long so far.
+    GrowingUp(f32),
+    Adult,
+}
+
 #[derive(Component)]
 pub struct Critter {
     /// Bottom centre of the body, in tiles.
@@ -57,6 +73,7 @@ pub struct Critter {
     excited: bool,
     /// Time left in the current activity.
     remaining: f32,
+    life: Life,
     rng: world::XorShift,
 }
 
@@ -76,9 +93,18 @@ impl Critter {
         min + (max - min) * self.rng.next_f32()
     }
 
+    fn baby(&self) -> bool {
+        matches!(self.life, Life::Baby { .. })
+    }
+
+    fn speed(&self) -> f32 {
+        if self.baby() { WALK_SPEED * BABY_SPEED } else { WALK_SPEED }
+    }
+
     /// Advance by `dt` seconds: climb out if buried, fall without a floor,
-    /// otherwise walk or rest.
-    fn update(&mut self, world: &world::World, dt: f32) {
+    /// grow up when old enough (standing still for the `grow_up` seconds the
+    /// animation lasts), otherwise walk or rest.
+    fn update(&mut self, world: &world::World, dt: f32, grow_up: f32) {
         if !fits(world, self.position) {
             if let Some(free) = unbury(world, self.position) {
                 self.position = free;
@@ -95,13 +121,27 @@ impl Critter {
             }
             return;
         }
+        match self.life {
+            Life::Baby { age, grown_at } if age + dt >= grown_at => {
+                self.life = Life::GrowingUp(0.0);
+                self.activity = Activity::Idle;
+                return;
+            }
+            Life::Baby { age, grown_at } => self.life = Life::Baby { age: age + dt, grown_at },
+            Life::GrowingUp(t) if t + dt >= grow_up => self.life = Life::Adult,
+            Life::GrowingUp(t) => {
+                self.life = Life::GrowingUp(t + dt);
+                return;
+            }
+            Life::Adult => {}
+        }
 
         self.remaining -= dt;
         if self.remaining <= 0.0 {
             self.decide();
         }
         if self.activity == Activity::Walk {
-            let dx = if self.facing_left { -WALK_SPEED * dt } else { WALK_SPEED * dt };
+            let dx = if self.facing_left { -self.speed() * dt } else { self.speed() * dt };
             match walk(world, self.position, dx) {
                 Some(to) => self.position = to,
                 None => self.facing_left = !self.facing_left,
@@ -114,6 +154,7 @@ impl Critter {
         let offset = player - self.position;
         self.excited = self.activity != Activity::Walk
             && !self.falling()
+            && !matches!(self.life, Life::GrowingUp(_))
             && offset.abs().cmple(NOTICE_DISTANCE).all();
         if self.excited && offset.x.abs() > 0.3 {
             self.facing_left = offset.x < 0.0;
@@ -195,9 +236,20 @@ struct HatchClips {
     excited: Clip,
 }
 
+/// Adult and baby Hatch animations (a baby naps where an adult grooms, and
+/// calls out where an adult gets excited), and growing up: the baby's part,
+/// then the adult's.
 #[derive(Resource)]
 struct CritterGraphics {
-    hatch: HatchClips,
+    adult: HatchClips,
+    baby: HatchClips,
+    grow_up: [Clip; 2],
+}
+
+impl CritterGraphics {
+    fn grow_up_time(&self) -> f32 {
+        self.grow_up.iter().map(Clip::duration).sum()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -207,6 +259,8 @@ enum ClipKind {
     Groom,
     Fall,
     Excited,
+    /// Growing up: the baby's part (0) or the adult's (1).
+    GrowUp(usize),
 }
 
 impl HatchClips {
@@ -217,6 +271,7 @@ impl HatchClips {
             ClipKind::Groom => &self.groom,
             ClipKind::Fall => &self.fall,
             ClipKind::Excited => &self.excited,
+            ClipKind::GrowUp(_) => unreachable!("growing up isn't a baby or adult animation"),
         }
     }
 }
@@ -224,6 +279,7 @@ impl HatchClips {
 #[derive(Component)]
 struct CritterAnimation {
     showing: ClipKind,
+    baby: bool,
     elapsed: f32,
 }
 
@@ -233,13 +289,25 @@ fn spawn_hatches(
     assets: Res<AssetServer>,
     mut layouts: ResMut<Assets<TextureAtlasLayout>>,
 ) {
-    let mut load = |name: &str| load_clip("critters/hatch", name, &assets, &mut layouts);
-    let hatch = HatchClips {
-        idle: load("idle_loop"),
-        walk: load("floor_floor_1_0_loop"),
-        groom: load("grooming_loop"),
-        fall: load("fall"),
-        excited: load("excited_loop"),
+    let mut load = |folder: &str, name: &str| {
+        load_clip(&format!("critters/{folder}"), name, &assets, &mut layouts)
+    };
+    let graphics = CritterGraphics {
+        adult: HatchClips {
+            idle: load("hatch", "idle_loop"),
+            walk: load("hatch", "floor_floor_1_0_loop"),
+            groom: load("hatch", "grooming_loop"),
+            fall: load("hatch", "fall"),
+            excited: load("hatch", "excited_loop"),
+        },
+        baby: HatchClips {
+            idle: load("baby_hatch", "idle_loop"),
+            walk: load("baby_hatch", "floor_floor_1_0_loop"),
+            groom: load("baby_hatch", "sleep_loop"),
+            fall: load("baby_hatch", "fall"),
+            excited: load("baby_hatch", "call_loop"),
+        },
+        grow_up: [load("baby_hatch", "growup_pre"), load("hatch", "growup_pst")],
     };
 
     let mut rng = world::XorShift::new(7);
@@ -254,7 +322,14 @@ fn spawn_hatches(
         let Some((x, y)) = level.world.find_standing_spot(near, 2) else {
             continue;
         };
-        let clip = &hatch.idle;
+        let baby = i % BABY_EVERY == 0;
+        let life = if baby {
+            let grown_at = GROW_UP_TIME.0 + (GROW_UP_TIME.1 - GROW_UP_TIME.0) * rng.next_f32();
+            Life::Baby { age: 0.0, grown_at }
+        } else {
+            Life::Adult
+        };
+        let clip = if baby { &graphics.baby.idle } else { &graphics.adult.idle };
         commands.spawn((
             Critter {
                 position: Vec2::new(x as f32 + 0.5, y as f32),
@@ -263,9 +338,14 @@ fn spawn_hatches(
                 activity: Activity::Idle,
                 excited: false,
                 remaining: 0.5 + rng.next_f32() * REST_TIME.1,
+                life,
                 rng: world::XorShift::new(rng.below(1 << 30) as u64 + 1),
             },
-            CritterAnimation { showing: ClipKind::Idle, elapsed: rng.next_f32() * clip.duration() },
+            CritterAnimation {
+                showing: ClipKind::Idle,
+                baby,
+                elapsed: rng.next_f32() * clip.duration(),
+            },
             Sprite::from_atlas_image(
                 clip.image.clone(),
                 TextureAtlas { layout: clip.layout.clone(), index: 0 },
@@ -274,18 +354,20 @@ fn spawn_hatches(
             Transform::default(),
         ));
     }
-    commands.insert_resource(CritterGraphics { hatch });
+    commands.insert_resource(graphics);
 }
 
 fn move_critters(
     time: Res<Time>,
     level: Res<Level>,
+    graphics: Res<CritterGraphics>,
     player: Single<&Player>,
     mut critters: Query<&mut Critter>,
 ) {
     let player_at = player.focus / TILE_SIZE;
+    let grow_up = graphics.grow_up_time();
     for mut critter in &mut critters {
-        critter.update(&level.world, time.delta_secs());
+        critter.update(&level.world, time.delta_secs(), grow_up);
         critter.notice(player_at);
     }
 }
@@ -297,31 +379,49 @@ fn animate_critters(
 ) {
     let scale = TILE_SIZE * TILES_PER_SHEET_PX;
     for (critter, mut anim, mut sprite, mut anchor, mut transform) in &mut critters {
-        let kind = match critter.activity {
-            _ if critter.falling() => ClipKind::Fall,
+        let kind = match (critter.life, critter.activity) {
+            (_, _) if critter.falling() => ClipKind::Fall,
+            (Life::GrowingUp(t), _) => {
+                ClipKind::GrowUp(usize::from(t >= graphics.grow_up[0].duration()))
+            }
             _ if critter.excited => ClipKind::Excited,
-            Activity::Walk => ClipKind::Walk,
-            Activity::Idle => ClipKind::Idle,
-            Activity::Groom => ClipKind::Groom,
+            (_, Activity::Walk) => ClipKind::Walk,
+            (_, Activity::Idle) => ClipKind::Idle,
+            (_, Activity::Groom) => ClipKind::Groom,
         };
-        let clips = &graphics.hatch;
-        if anim.showing != kind {
+        let baby = critter.baby();
+        let clip = match kind {
+            ClipKind::GrowUp(part) => &graphics.grow_up[part],
+            _ if baby => graphics.baby.get(kind),
+            _ => graphics.adult.get(kind),
+        };
+        if anim.showing != kind || anim.baby != baby {
             anim.showing = kind;
+            anim.baby = baby;
             anim.elapsed = 0.0;
-            let clip = clips.get(kind);
             sprite.image = clip.image.clone();
             sprite.texture_atlas = Some(TextureAtlas { layout: clip.layout.clone(), index: 0 });
             *anchor = clip.anchor;
         }
-        let clip = clips.get(kind);
-        // The walk cycle covers one cell; pace it so the feet don't slide.
-        let fps = match kind {
-            ClipKind::Walk => clip.frames as f32 * WALK_SPEED / CELL_TILES,
-            _ => clip.fps,
+        let index = match kind {
+            // Growing up plays once, in step with the critter's own clock.
+            ClipKind::GrowUp(part) => {
+                let Life::GrowingUp(t) = critter.life else { unreachable!() };
+                let start = if part == 1 { graphics.grow_up[0].duration() } else { 0.0 };
+                (((t - start) * clip.fps) as usize).min(clip.frames - 1)
+            }
+            _ => {
+                // The walk cycle covers one cell; pace it so the feet don't slide.
+                let fps = match kind {
+                    ClipKind::Walk => clip.frames as f32 * critter.speed() / CELL_TILES,
+                    _ => clip.fps,
+                };
+                anim.elapsed = (anim.elapsed + time.delta_secs()) % (clip.frames as f32 / fps);
+                (anim.elapsed * fps) as usize % clip.frames
+            }
         };
-        anim.elapsed = (anim.elapsed + time.delta_secs()) % (clip.frames as f32 / fps);
         if let Some(atlas) = &mut sprite.texture_atlas {
-            atlas.index = (anim.elapsed * fps) as usize % clip.frames;
+            atlas.index = index;
         }
 
         transform.translation = (critter.position * TILE_SIZE).extend(CRITTER_Z);
@@ -386,13 +486,14 @@ mod tests {
                 activity: Activity::Idle,
                 excited: false,
                 remaining: 0.0,
+                life: Life::Adult,
                 rng: world::XorShift::new(i as u64 + 1),
             };
             let mut travelled = 0.0;
             let mut falling_for = 0;
             for _ in 0..60 * 60 {
                 let before = hatch.position;
-                hatch.update(&world, 1.0 / 60.0);
+                hatch.update(&world, 1.0 / 60.0, 2.0);
                 travelled += (hatch.position.x - before.x).abs();
                 assert!(fits(&world, hatch.position), "hatch {i} in rock at {}", hatch.position);
                 falling_for = if hatch.falling() { falling_for + 1 } else { 0 };
@@ -411,6 +512,7 @@ mod tests {
             activity: Activity::Idle,
             excited: false,
             remaining: 1.0,
+            life: Life::Adult,
             rng: world::XorShift::new(1),
         };
         hatch.notice(Vec2::new(3.0, 1.0));
@@ -420,6 +522,30 @@ mod tests {
         hatch.activity = Activity::Walk;
         hatch.notice(Vec2::new(6.5, 1.0));
         assert!(!hatch.excited, "busy walking");
+    }
+
+    #[test]
+    fn babies_grow_up_standing_still() {
+        let world = world::World::from_ascii(&["......", "......", "......", "######"]);
+        let mut hatch = Critter {
+            position: Vec2::new(2.5, 1.0),
+            fall_speed: 0.0,
+            facing_left: false,
+            activity: Activity::Walk,
+            excited: false,
+            remaining: 100.0,
+            life: Life::Baby { age: 0.0, grown_at: 1.0 },
+            rng: world::XorShift::new(1),
+        };
+        hatch.update(&world, 0.5, 2.0);
+        assert!(hatch.baby());
+        hatch.update(&world, 0.5, 2.0);
+        assert_eq!(hatch.life, Life::GrowingUp(0.0));
+        let at = hatch.position;
+        hatch.update(&world, 1.0, 2.0);
+        assert_eq!(hatch.position, at, "stands still while growing up");
+        hatch.update(&world, 1.0, 2.0);
+        assert_eq!(hatch.life, Life::Adult);
     }
 
     #[test]

@@ -1,6 +1,6 @@
-//! The player's inventory: how much of each material has been dug out, shown
-//! as a row of ONI's material icons on a black panel in the lower right corner
-//! of the screen.
+//! The player's inventory: how much of each material has been dug out and of
+//! each plant's produce harvested, shown as a row of ONI's item icons on a
+//! black panel in the lower right corner of the screen.
 //!
 //! Quantities count in bits, 8 to a tile (see `info/concept.md`). An icon shows
 //! the whole tiles as a number 1-9 and the remaining 0-7 bits as small squares
@@ -11,9 +11,8 @@ use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use image::RgbaImage;
 
-use crate::Level;
 
-/// ONI's material icons, `<material>.png` (placeholder art, not in git).
+/// ONI's item icons, `<item>.png` (placeholder art, not in git).
 const ICON_DIR: &str = "oni/icons";
 
 pub const BITS_PER_TILE: u32 = 8;
@@ -45,10 +44,15 @@ const BIT_GAP: f32 = 1.0;
 const BIT_COLOR: Color = Color::WHITE;
 
 /// Amounts held, always counted in bits; whole tiles only appear when shown.
+/// Items are the materials (indexed like [`crate::world::Biomes::materials`]),
+/// then each plant species' produce (in [`crate::world::Biomes::plants`] order).
 #[derive(Resource)]
 pub struct Inventory {
-    /// Bits of each material, indexed like [`crate::world::Biomes::materials`].
+    /// Each item's name, which is also its icon's.
+    names: Vec<String>,
     bits: Vec<u32>,
+    /// Index of the first plant's produce.
+    first_produce: usize,
 }
 
 /// An amount as shown: whole tiles and the bits left over, or a full slot.
@@ -69,52 +73,67 @@ impl Quantity {
 }
 
 impl Inventory {
-    pub fn new(materials: usize) -> Self {
-        Self { bits: vec![0; materials] }
+    pub fn new(biomes: &crate::world::Biomes) -> Self {
+        let names: Vec<String> = biomes
+            .materials
+            .iter()
+            .cloned()
+            .chain(biomes.plants.iter().map(|plant| plant.produce.clone()))
+            .collect();
+        Self { bits: vec![0; names.len()], names, first_produce: biomes.materials.len() }
     }
 
-    /// Add `bits` of `material`, up to a full slot; anything beyond is lost.
-    pub fn add(&mut self, material: u8, bits: u32) {
-        let held = &mut self.bits[material as usize];
+    /// The item for a material.
+    pub fn material(material: u8) -> usize {
+        material as usize
+    }
+
+    /// The item harvesting plant species `plant` yields.
+    pub fn produce(&self, plant: usize) -> usize {
+        self.first_produce + plant
+    }
+
+    /// Add `bits` of `item`, up to a full slot; anything beyond is lost.
+    pub fn add(&mut self, item: usize, bits: u32) {
+        let held = &mut self.bits[item];
         *held = (*held + bits).min(SLOT_CAPACITY);
     }
 
-    /// The materials held, with their bits, in material order.
-    fn held(&self) -> impl Iterator<Item = (u8, u32)> + '_ {
+    /// The items held, with their bits, in item order.
+    fn held(&self) -> impl Iterator<Item = (usize, u32)> + '_ {
         (0..)
             .zip(self.bits.iter().copied())
             .filter(|&(_, bits)| bits > 0)
     }
 }
 
-/// The panel holding the row of material icons.
+/// The panel holding the row of item icons.
 #[derive(Component)]
 pub struct InventoryBar;
 
-/// A material's icon, and the same with a white outline for a full slot, with
+/// An item's icon, and the same with a white outline for a full slot, with
 /// their sizes on screen (fitted into a slot, keeping their shape).
-struct MaterialIcon {
+struct ItemIcon {
     plain: Handle<Image>,
     plain_size: Vec2,
     full: Handle<Image>,
     full_size: Vec2,
 }
 
-/// Icons indexed like [`crate::world::Biomes::materials`].
+/// Icons indexed like the inventory's items.
 #[derive(Resource)]
-pub struct MaterialIcons(Vec<MaterialIcon>);
+pub struct ItemIcons(Vec<ItemIcon>);
 
 pub fn spawn_inventory_bar(
     mut commands: Commands,
-    level: Res<Level>,
+    inventory: Res<Inventory>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let mut add = |image: RgbaImage| {
         images.add(Image::from_dynamic(image.into(), true, RenderAssetUsages::RENDER_WORLD))
     };
-    let icons = level
-        .biomes
-        .materials
+    let icons = inventory
+        .names
         .iter()
         .map(|name| {
             let path = format!("{}/asset/{ICON_DIR}/{name}.png", env!("CARGO_MANIFEST_DIR"));
@@ -124,7 +143,7 @@ pub fn spawn_inventory_bar(
             let scale = ICON_SIZE / icon.width().max(icon.height()) as f32;
             let full = outlined(&icon, FULL_OUTLINE / scale);
             let size = |image: &RgbaImage| Vec2::new(image.width() as f32, image.height() as f32) * scale;
-            MaterialIcon {
+            ItemIcon {
                 plain_size: size(&icon),
                 full_size: size(&full),
                 plain: add(icon),
@@ -132,7 +151,7 @@ pub fn spawn_inventory_bar(
             }
         })
         .collect();
-    commands.insert_resource(MaterialIcons(icons));
+    commands.insert_resource(ItemIcons(icons));
     commands.spawn((
         InventoryBar,
         Node {
@@ -155,7 +174,7 @@ pub fn spawn_inventory_bar(
 pub fn show_inventory(
     mut commands: Commands,
     inventory: Res<Inventory>,
-    icons: Res<MaterialIcons>,
+    icons: Res<ItemIcons>,
     bar: Single<(Entity, &mut Node), With<InventoryBar>>,
 ) {
     if !inventory.is_changed() {
@@ -164,9 +183,9 @@ pub fn show_inventory(
     let (bar, mut node) = bar.into_inner();
     node.display = if inventory.held().next().is_some() { Display::Flex } else { Display::None };
     commands.entity(bar).despawn_children().with_children(|bar| {
-        for (material, bits) in inventory.held() {
+        for (item, bits) in inventory.held() {
             let quantity = Quantity::of(bits);
-            let icon = &icons.0[material as usize];
+            let icon = &icons.0[item];
             let (image, size) = match quantity {
                 Quantity::Full => (&icon.full, icon.full_size),
                 Quantity::Partial { .. } => (&icon.plain, icon.plain_size),
@@ -325,7 +344,7 @@ mod tests {
 
     #[test]
     fn holds_at_most_ten_tiles_per_material() {
-        let mut inventory = Inventory::new(4);
+        let mut inventory = Inventory { names: vec![], bits: vec![0; 4], first_produce: 4 };
         assert_eq!(inventory.held().count(), 0);
         inventory.add(2, BITS_PER_TILE);
         inventory.add(0, 1);

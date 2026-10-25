@@ -17,7 +17,16 @@ const EMPTY_SHARE: f32 = 0.35;
 /// Biome definitions as written in the data file.
 #[derive(Deserialize)]
 struct BiomeFile {
+    #[serde(default)]
+    plants: Vec<PlantDef>,
     biomes: Vec<BiomeDef>,
+}
+
+/// A plant species, and the item harvesting it yields.
+#[derive(Deserialize)]
+pub struct PlantDef {
+    pub name: String,
+    pub produce: String,
 }
 
 #[derive(Deserialize)]
@@ -25,6 +34,8 @@ struct BiomeDef {
     name: String,
     background: String,
     materials: Vec<String>,
+    #[serde(default)]
+    plants: Vec<String>,
 }
 
 pub struct Biome {
@@ -32,11 +43,14 @@ pub struct Biome {
     pub background: String,
     /// Indices into [`Biomes::materials`].
     pub materials: Vec<u8>,
+    /// Plant species growing wild here, as indices into [`Biomes::plants`].
+    pub plants: Vec<usize>,
 }
 
-/// All biomes, plus the materials they use (each listed once).
+/// All biomes, plus the materials they use (each listed once) and the plant species.
 pub struct Biomes {
     pub materials: Vec<String>,
+    pub plants: Vec<PlantDef>,
     pub biomes: Vec<Biome>,
 }
 
@@ -64,9 +78,19 @@ impl Biomes {
                     }
                 })
                 .collect();
-            biomes.push(Biome { background: def.background, materials: ids });
+            let plants = def
+                .plants
+                .iter()
+                .map(|name| {
+                    file.plants
+                        .iter()
+                        .position(|p| p.name == *name)
+                        .ok_or_else(|| format!("biome {} has unknown plant {name}", def.name))
+                })
+                .collect::<Result<_, _>>()?;
+            biomes.push(Biome { background: def.background, materials: ids, plants });
         }
-        Ok(Self { materials, biomes })
+        Ok(Self { materials, plants: file.plants, biomes })
     }
 }
 

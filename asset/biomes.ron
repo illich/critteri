@@ -1,26 +1,42 @@
 // Biomes the level generator can place, and the materials each one is made of.
-// `background` and `materials` name textures in asset/oni/tiles/{backgrounds,materials}/.
+// `background` and `materials` name textures in asset/oni/tiles/{backgrounds,materials}/;
+// `plants` name the plant species growing wild there, from the list below.
 (
+    // Plant species (sheets in asset/oni/plants/<name>/) and the item a harvest yields
+    // (icon in asset/oni/icons/<produce>.png).
+    plants: [
+        (name: "meallice", produce: "meallicegrain"),
+        (name: "bristleblossom", produce: "bristleberry"),
+        (name: "coldwheat", produce: "coldwheatgrain"),
+        (name: "beanplant", produce: "beans"),
+        (name: "swamplily", produce: "swamplilyflower"),
+        (name: "fungusplant", produce: "funguscap"),
+        (name: "gassygrass", produce: "harvested_gassygrass"),
+    ],
     biomes: [
         (
             name: "Sandstone",
             background: "sandstone",
             materials: ["sandstone", "sand", "dirt", "algae", "copper_ore", "fertilizer", "granite"],
+            plants: ["meallice", "bristleblossom"],
         ),
         (
             name: "Frozen",
             background: "frozen_wastes",
             materials: ["ice", "snow", "polluted_ice", "wolframite", "igneous_rock", "sedimentary_rock"],
+            plants: ["coldwheat", "beanplant"],
         ),
         (
             name: "Marsh",
             background: "boggy_marsh",
             materials: ["slime", "algae", "clay", "gold_amalgam", "sedimentary_rock", "polluted_dirt"],
+            plants: ["swamplily", "fungusplant"],
         ),
         (
             name: "Volcanic",
             background: "magma_core",
             materials: ["igneous_rock", "obsidian", "mafic_rock", "abyssalite", "pyrite", "coal"],
+            plants: ["gassygrass"],
         ),
     ],
 )

@@ -35,8 +35,9 @@ pub struct Clip {
     pub anchor: Anchor,
     pub frames: usize,
     pub fps: f32,
-    /// How far a frame reaches right of the origin, in sheet pixels.
+    /// How far a frame reaches right of, and above, the origin, in sheet pixels.
     pub reach: f32,
+    pub rise: f32,
     /// Each frame's tool muzzle relative to the origin, in sheet pixels (y up);
     /// empty without a tool.
     pub tips: Vec<Vec2>,
@@ -86,6 +87,7 @@ pub fn load_clip(
         frames: info.frames,
         fps: info.fps,
         reach: (w - ox) as f32,
+        rise: oy as f32,
         tips: info
             .tips
             .iter()

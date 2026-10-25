@@ -157,7 +157,7 @@ pub fn dig(
     let (x, y) = (tile.x as usize, tile.y as usize);
     if digging.elapsed >= DIG_TIME {
         if let Some(material) = level.world.dig(x, y) {
-            inventory.add(material, BITS_PER_TILE);
+            inventory.add(Inventory::material(material), BITS_PER_TILE);
         }
         redraw_tile(&graphics, &level.world, &mut tile_sprites, x, y);
         digging.tile = None;

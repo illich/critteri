@@ -3,6 +3,7 @@ mod critter;
 mod cursor;
 mod inventory;
 mod mining;
+mod plant;
 mod player;
 mod sheet;
 mod world;
@@ -58,9 +59,9 @@ fn main() {
                     ..default()
                 }),
         )
-        .add_plugins((player::PlayerPlugin, critter::CritterPlugin))
+        .add_plugins((player::PlayerPlugin, critter::CritterPlugin, plant::PlantPlugin))
         .insert_resource(ClearColor(Color::BLACK))
-        .insert_resource(inventory::Inventory::new(biomes.materials.len()))
+        .insert_resource(inventory::Inventory::new(&biomes))
         .insert_resource(Level { world, biomes })
         .init_resource::<cursor::HoveredTile>()
         .add_systems(
