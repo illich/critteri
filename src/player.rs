@@ -2,12 +2,10 @@
 
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
-use serde::Deserialize;
 
+use crate::sheet::{load_clip, Clip};
 use crate::{world, Level, TILE_SIZE};
 
-/// Rendered ONI duplicant sheets (placeholder art, not in git).
-const SHEETS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/asset/oni/player");
 /// Visible height of the standing duplicant in tiles.
 pub const HEIGHT_TILES: f32 = 2.7;
 /// Height of a standing duplicant in the rendered sheets, in pixels; sets the
@@ -17,7 +15,8 @@ const SHEET_HEIGHT_PX: f32 = 154.0;
 /// move the duplicant (walk cycle, climbs, jumps) move it in whole cells.
 const SHEET_CELL_PX: f32 = 100.0;
 /// Our tiles per sheet pixel, from scaling the duplicant to [`HEIGHT_TILES`].
-const TILES_PER_SHEET_PX: f32 = HEIGHT_TILES / SHEET_HEIGHT_PX;
+/// Effects rendered at the same kanim scale use it too.
+pub const TILES_PER_SHEET_PX: f32 = HEIGHT_TILES / SHEET_HEIGHT_PX;
 /// One ONI cell in our tiles.
 const CELL_TILES: f32 = SHEET_CELL_PX * TILES_PER_SHEET_PX;
 /// Half the width of the collision box, in tiles. Its height is [`HEIGHT_TILES`].
@@ -34,6 +33,12 @@ const RUN_CLEARANCE: f32 = 3.0;
 const MAX_SAFE_DROP: f32 = 3.0;
 /// Speed on ladders in tiles per second.
 const LADDER_SPEED: f32 = 3.0;
+/// Height above the feet, in tiles, from which the dig pose is chosen by the
+/// direction to the dug tile (about where the tool is held).
+const AIM_HEIGHT: f32 = 1.1;
+/// Where the tool is assumed to be, relative to the feet and facing right, while
+/// digging without a dig pose (walking, falling, climbing).
+const UNPOSED_TOOL: Vec2 = Vec2::new(0.35, 1.2);
 /// Gravity in tiles per second squared, and the terminal falling speed.
 const GRAVITY: f32 = 40.0;
 const MAX_FALL_SPEED: f32 = 20.0;
@@ -48,77 +53,6 @@ impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_player)
             .add_systems(Update, (move_player, animate_player).chain().in_set(PlayerSystems));
-    }
-}
-
-/// Index of rendered sheets, `animations.ron` in each sheet folder.
-#[derive(Deserialize)]
-struct SheetIndex {
-    animations: Vec<SheetInfo>,
-}
-
-#[derive(Deserialize)]
-struct SheetInfo {
-    name: String,
-    file: String,
-    frame_size: (u32, u32),
-    /// Pixel within a frame where the feet are, from the frame's top-left.
-    origin: (u32, u32),
-    columns: u32,
-    rows: u32,
-    frames: usize,
-    fps: f32,
-}
-
-struct Clip {
-    image: Handle<Image>,
-    layout: Handle<TextureAtlasLayout>,
-    anchor: Anchor,
-    frames: usize,
-    fps: f32,
-}
-
-impl Clip {
-    fn duration(&self) -> f32 {
-        self.frames as f32 / self.fps
-    }
-}
-
-fn load_clip(
-    folder: &str,
-    name: &str,
-    assets: &AssetServer,
-    layouts: &mut Assets<TextureAtlasLayout>,
-) -> Clip {
-    let index_path = format!("{SHEETS_DIR}/{folder}/animations.ron");
-    let source = std::fs::read_to_string(&index_path)
-        .unwrap_or_else(|e| panic!("cannot read {index_path}: {e}"));
-    let index: SheetIndex =
-        ron::from_str(&source).unwrap_or_else(|e| panic!("invalid {index_path}: {e}"));
-    let info = index
-        .animations
-        .into_iter()
-        .find(|a| a.name == name)
-        .unwrap_or_else(|| panic!("no animation {name} in {index_path}"));
-
-    let (w, h) = info.frame_size;
-    let (ox, oy) = info.origin;
-    Clip {
-        image: assets.load(format!("oni/player/{folder}/{}", info.file)),
-        layout: layouts.add(TextureAtlasLayout::from_grid(
-            UVec2::new(w, h),
-            info.columns,
-            info.rows,
-            None,
-            None,
-        )),
-        // Sheet origin (y down from the top-left) as a sprite anchor (y up from the centre).
-        anchor: Anchor(Vec2::new(
-            ox as f32 / w as f32 - 0.5,
-            0.5 - oy as f32 / h as f32,
-        )),
-        frames: info.frames,
-        fps: info.fps,
     }
 }
 
@@ -138,6 +72,51 @@ enum ClipKind {
     LadderDown,
     /// Holding on to a ladder without climbing.
     LadderIdle,
+    /// Aiming the dig tool, standing or on a ladder; first raising it, then looping.
+    Dig { aim: Aim, ladder: bool, looping: bool },
+}
+
+/// Directions of the dig poses.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Aim {
+    Forward,
+    Up,
+    Down,
+    DiagonalUp,
+    DiagonalDown,
+}
+
+impl Aim {
+    const ALL: [Aim; 5] = [Aim::Forward, Aim::Up, Aim::Down, Aim::DiagonalUp, Aim::DiagonalDown];
+
+    /// The pose closest to direction `to` (from the tool, facing right or left).
+    fn towards(to: Vec2) -> Aim {
+        let angle = to.y.atan2(to.x.abs()).to_degrees();
+        match angle {
+            a if a > 67.5 => Aim::Up,
+            a if a > 22.5 => Aim::DiagonalUp,
+            a if a >= -22.5 => Aim::Forward,
+            a if a >= -67.5 => Aim::DiagonalDown,
+            _ => Aim::Down,
+        }
+    }
+
+    /// Names of the standing and ladder pose animations (raising the tool, then looping).
+    fn animations(self) -> [[&'static str; 2]; 2] {
+        match self {
+            Aim::Forward => [["dig_fwd_pre", "dig_fwd_loop"], ["ladder_dig_pre", "ladder_dig_loop"]],
+            Aim::Up => [["dig_up_pre", "dig_up_loop"], ["ladder_dig_up_pre", "ladder_dig_up_loop"]],
+            Aim::Down => [["dig_dn_pre", "dig_dn_loop"], ["ladder_dig_dn_pre", "ladder_dig_dn_loop"]],
+            Aim::DiagonalUp => [
+                ["dig_diag_up_pre", "dig_diag_up_loop"],
+                ["ladder_dig_diag_up_pre", "ladder_dig_loop_diag_up"],
+            ],
+            Aim::DiagonalDown => [
+                ["dig_diag_dn_pre", "dig_diag_dn_loop"],
+                ["ladder_dig_diag_dn_pre", "ladder_dig_loop_diag_dn"],
+            ],
+        }
+    }
 }
 
 struct Clips {
@@ -151,6 +130,8 @@ struct Clips {
     ladder_up: Clip,
     ladder_down: Clip,
     ladder_idle: Clip,
+    /// Dig poses by [`Aim::ALL`] index, then standing/ladder, then raising/looping.
+    dig: Vec<[[Clip; 2]; 2]>,
 }
 
 impl Clips {
@@ -166,6 +147,10 @@ impl Clips {
             ClipKind::LadderUp => &self.ladder_up,
             ClipKind::LadderDown => &self.ladder_down,
             ClipKind::LadderIdle => &self.ladder_idle,
+            ClipKind::Dig { aim, ladder, looping } => {
+                let aim = Aim::ALL.iter().position(|&a| a == aim).unwrap();
+                &self.dig[aim][ladder as usize][looping as usize]
+            }
         }
     }
 }
@@ -209,6 +194,10 @@ pub struct Player {
     speed: f32,
     /// Where the camera should look, in world units; follows the body smoothly while leaping.
     pub focus: Vec2,
+    /// Centre of the tile being dug, in tiles; set by digging.
+    pub dig_target: Option<Vec2>,
+    /// Muzzle of the dig tool while digging, in world units.
+    pub tool_tip: Option<Vec2>,
 }
 
 impl Player {
@@ -247,7 +236,9 @@ fn spawn_player(
         .world
         .find_standing_spot(world::WIDTH / 2, HEIGHT_TILES.ceil() as usize)
         .expect("no room for the player in the level");
-    let mut load = |folder, name| load_clip(folder, name, &assets, &mut layouts);
+    let mut load = |folder: &str, name: &str| {
+        load_clip(&format!("player/{folder}"), name, &assets, &mut layouts)
+    };
     let clips = Clips {
         idle: load("idle", "idle_default"),
         walk: load("loco", "floor_floor_1_0_loop"),
@@ -259,6 +250,10 @@ fn spawn_player(
         ladder_up: load("loco", "ladder_ladder_0_1_loop"),
         ladder_down: load("loco", "ladder_ladder_0_-1_loop"),
         ladder_idle: load("idle", "ladder_idle"),
+        dig: Aim::ALL
+            .iter()
+            .map(|aim| aim.animations().map(|names| names.map(|name| load("dig", name))))
+            .collect(),
     };
 
     commands.spawn((
@@ -271,6 +266,8 @@ fn spawn_player(
             running: false,
             speed: WALK_SPEED,
             focus: Vec2::ZERO,
+            dig_target: None,
+            tool_tip: None,
         },
         Sprite::from_atlas_image(
             clips.idle.image.clone(),
@@ -633,7 +630,7 @@ fn animate_player(
 ) {
     let (mut player, mut anim, mut sprite, mut anchor, mut transform) = player.into_inner();
 
-    let (kind, sprite_at, body_at, climb_progress) = match player.motion {
+    let (mut kind, sprite_at, body_at, climb_progress) = match player.motion {
         Motion::Idle => (ClipKind::Idle, player.position, player.position, None),
         Motion::Walk | Motion::StepAcross { .. } => {
             (ClipKind::Walk, player.position, player.position, None)
@@ -656,6 +653,28 @@ fn animate_player(
     };
     player.focus = body_at * TILE_SIZE;
 
+    // Digging while standing or resting on a ladder: face the tile and aim the
+    // tool at it, raising the tool first unless already aiming.
+    if let Some(target) = player.dig_target
+        && matches!(kind, ClipKind::Idle | ClipKind::LadderIdle)
+    {
+        let to = target - (player.position + Vec2::new(0.0, AIM_HEIGHT));
+        if to.x.abs() > 0.05 {
+            player.facing_left = to.x < 0.0;
+        }
+        let aim = Aim::towards(to);
+        let ladder = kind == ClipKind::LadderIdle;
+        // Once raised, the tool turns straight to a new aim.
+        let raised = anim.elapsed + time.delta_secs() >= anim.clips.get(anim.showing).duration();
+        let looping = match anim.showing {
+            ClipKind::Dig { aim: shown, ladder: on_ladder, looping } if on_ladder == ladder => {
+                looping || (shown == aim && raised)
+            }
+            _ => false,
+        };
+        kind = ClipKind::Dig { aim, ladder, looping };
+    }
+
     transform.translation = (sprite_at * TILE_SIZE).extend(1.0);
     let scale = TILE_SIZE * TILES_PER_SHEET_PX;
     // The sheets face right. Mirroring through the scale keeps the anchor (the feet) in place.
@@ -671,7 +690,7 @@ fn animate_player(
     }
 
     let clip = anim.clips.get(kind);
-    let frames = clip.frames;
+    let (frames, clip_fps) = (clip.frames, clip.fps);
     let index = match climb_progress {
         Some(t) => ((t * frames as f32) as usize).min(frames - 1),
         None => {
@@ -682,7 +701,7 @@ fn animate_player(
                 ClipKind::LadderUp | ClipKind::LadderDown => {
                     frames as f32 * LADDER_SPEED / CELL_TILES
                 }
-                _ => clip.fps,
+                _ => clip_fps,
             };
             anim.elapsed = (anim.elapsed + time.delta_secs()) % (frames as f32 / fps);
             (anim.elapsed * fps) as usize % frames
@@ -691,6 +710,13 @@ fn animate_player(
     if let Some(atlas) = &mut sprite.texture_atlas {
         atlas.index = index;
     }
+
+    // The tool's muzzle: from the dig pose's frame, or a guess near the hands.
+    let mirror = Vec2::new(transform.scale.x.signum(), 1.0);
+    player.tool_tip = player.dig_target.map(|_| match anim.clips.get(kind).tips.get(index) {
+        Some(&tip) => transform.translation.truncate() + tip * mirror * scale,
+        None => (body_at + UNPOSED_TOOL * mirror) * TILE_SIZE,
+    });
 }
 
 #[cfg(test)]
@@ -932,6 +958,8 @@ mod tests {
             running: false,
             speed: WALK_SPEED,
             focus: Vec2::ZERO,
+            dig_target: None,
+            tool_tip: None,
         };
         // The body spans x 2.1-2.9 and y 1-3.7.
         assert!(player.covers_tile(2, 1) && player.covers_tile(2, 3));
@@ -1030,6 +1058,16 @@ mod tests {
         // Just below the bottom edge, nothing holds the body until the floor.
         assert_eq!(landing(&world, 3.5, 2.999, 2.9), None);
         assert_eq!(landing(&world, 3.5, 3.0, 2.9), Some(3.0), "but resting on it does");
+    }
+
+    #[test]
+    fn aims_at_the_nearest_dig_pose() {
+        assert_eq!(Aim::towards(Vec2::new(3.0, 0.5)), Aim::Forward);
+        assert_eq!(Aim::towards(Vec2::new(-3.0, -0.5)), Aim::Forward, "facing left");
+        assert_eq!(Aim::towards(Vec2::new(1.0, 1.0)), Aim::DiagonalUp);
+        assert_eq!(Aim::towards(Vec2::new(-1.0, -1.0)), Aim::DiagonalDown);
+        assert_eq!(Aim::towards(Vec2::new(0.0, 2.0)), Aim::Up);
+        assert_eq!(Aim::towards(Vec2::new(0.3, -2.0)), Aim::Down);
     }
 
     #[test]

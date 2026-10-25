@@ -160,12 +160,12 @@ impl World {
         self.biomes[y * WIDTH + x]
     }
 
-    /// Dig out a solid tile, leaving it empty. Returns whether there was anything to dig.
-    pub fn dig(&mut self, x: usize, y: usize) -> bool {
-        let tile = &mut self.tiles[y * WIDTH + x];
-        let was_solid = matches!(tile, Tile::Solid { .. });
-        *tile = Tile::Empty;
-        was_solid
+    /// Dig out a solid tile, leaving it empty. Returns the material dug out, if any.
+    pub fn dig(&mut self, x: usize, y: usize) -> Option<u8> {
+        match std::mem::replace(&mut self.tiles[y * WIDTH + x], Tile::Empty) {
+            Tile::Solid { material } => Some(material),
+            Tile::Empty => None,
+        }
     }
 
     /// Fill an empty tile with the material of one of its solid neighbours (left,
@@ -330,9 +330,9 @@ mod tests {
     #[test]
     fn digging_empties_solid_tiles() {
         let mut world = World::from_ascii(&["#."]);
-        assert!(world.dig(0, 0));
+        assert_eq!(world.dig(0, 0), Some(0));
         assert!(!world.is_solid(0, 0));
-        assert!(!world.dig(1, 0), "nothing to dig in an empty tile");
+        assert_eq!(world.dig(1, 0), None, "nothing to dig in an empty tile");
     }
 
     #[test]

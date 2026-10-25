@@ -1,0 +1,11 @@
+#!/bin/sh
+# Build and run the game with the cargo home shared by everyone working on this
+# project, so builds by different users reuse the same target/ (cargo tracks the
+# full path of every dependency's source). Arguments go to `cargo run`.
+set -e
+cd "$(dirname "$0")"
+umask 002
+export CARGO_HOME="$PWD/.tools/cargo"
+# Prefer the user's rustup toolchain over an older system one.
+[ -d "$HOME/.cargo/bin" ] && PATH="$HOME/.cargo/bin:$PATH"
+exec cargo run "$@"

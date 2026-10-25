@@ -1,7 +1,9 @@
 mod building;
 mod cursor;
+mod inventory;
 mod mining;
 mod player;
+mod sheet;
 mod world;
 
 use bevy::asset::RenderAssetUsages;
@@ -57,6 +59,7 @@ fn main() {
         )
         .add_plugins(player::PlayerPlugin)
         .insert_resource(ClearColor(Color::BLACK))
+        .insert_resource(inventory::Inventory::new(biomes.materials.len()))
         .insert_resource(Level { world, biomes })
         .init_resource::<cursor::HoveredTile>()
         .add_systems(
@@ -67,6 +70,7 @@ fn main() {
                 cursor::spawn_tile_highlight,
                 mining::setup_digging,
                 building::setup_buildings,
+                inventory::spawn_inventory_bar,
             ),
         )
         .add_systems(
@@ -76,6 +80,8 @@ fn main() {
                     follow_player,
                     cursor::highlight_hovered_tile,
                     mining::dig,
+                    mining::show_dig_beam,
+                    inventory::show_inventory,
                     mining::fill,
                     building::place_ladder,
                 )
