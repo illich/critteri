@@ -29,6 +29,11 @@ And 2-5 hours per level.
 Flow would be important.
 Not sure how it will work yet :)
 
+6. Preferably no numbers
+Most of the things should not require any numbers - you should see if the item/critter/building is there and if it works.
+Some things (such as inventory) will use numbers 1-9.
+Hopefully, we will avoid bigger numbers :)
+
 
 Design
 
