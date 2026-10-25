@@ -63,3 +63,17 @@ Probably Rust, Bevy.
 
 
 
+Counting stuff, inventory, chests
+
+1 tile is 8 "bits".
+When displaying quantities, it is shown as number 1-9 representing tiles. And then a small icon consisting of 0-7 bits, small squares, stacked as 2 side, 4 high, filled in from lower left.
+10 tiles is the maximum amount that inventory slot or a chest can carry. "10" is not shown. Instead, the icon of the material is highlighted with white border. That represents full occupancy, 10 tiles. Nothing more can be added.
+
+
+
+
+
+
+
+
+

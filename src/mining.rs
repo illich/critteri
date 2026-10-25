@@ -11,7 +11,7 @@ use image::{GrayImage, Luma, Rgba, RgbaImage};
 use crate::building::BuildingSprites;
 use crate::critter::Critter;
 use crate::cursor::HoveredTile;
-use crate::inventory::{Inventory, UNITS_PER_TILE};
+use crate::inventory::{Inventory, BITS_PER_TILE};
 use crate::player::{Player, TILES_PER_SHEET_PX};
 use crate::sheet::{load_clip, Clip};
 use crate::{
@@ -157,7 +157,7 @@ pub fn dig(
     let (x, y) = (tile.x as usize, tile.y as usize);
     if digging.elapsed >= DIG_TIME {
         if let Some(material) = level.world.dig(x, y) {
-            inventory.add(material, UNITS_PER_TILE);
+            inventory.add(material, BITS_PER_TILE);
         }
         redraw_tile(&graphics, &level.world, &mut tile_sprites, x, y);
         digging.tile = None;
